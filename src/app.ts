@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import type { OrbIdentity } from "./auth"
 import { verifyHmac } from "./crypto"
-import { RelayDatabase } from "./database"
+import { SubscriptionDatabase } from "./database"
 import { normalizeGitHubEvent } from "./events"
 import {
   subscriptionEvents,
@@ -10,7 +10,7 @@ import {
   type SubscriptionEvent,
 } from "./types"
 
-export interface RelayConfig {
+export interface SubscriptionBridgeConfig {
   databasePath: string
   githubWebhookSecret: string
   allowedWebhookHosts: string[]
@@ -51,9 +51,9 @@ function validBranch(value: unknown): value is string {
     && value.split("/").every((part) => !part.startsWith(".") && !part.endsWith(".lock"))
 }
 
-export function createRelay(config: RelayConfig) {
+export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
   if (config.databasePath !== ":memory:") mkdirSync(dirname(config.databasePath), { recursive: true })
-  const database = new RelayDatabase(config.databasePath)
+  const database = new SubscriptionDatabase(config.databasePath)
 
   async function subscriptions(request: Request): Promise<Response> {
     const identity = await config.authenticate(request).catch(() => null)

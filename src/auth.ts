@@ -11,7 +11,7 @@ export interface OrbIdentity {
 }
 
 export interface OidcConfig {
-  audience: string
+  audience: string | string[]
   allowedWorkspaceIds: string[]
   allowedProjectIds: string[]
   allowedUserIds: string[]

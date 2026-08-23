@@ -1,6 +1,6 @@
 # GitHub App setup
 
-Create one GitHub App for the relay deployment.
+Create one GitHub App for the amp-subscribe deployment.
 
 ## Webhook
 
@@ -20,7 +20,7 @@ Subscribe to these repository events:
 
 ## Permissions
 
-The relay only receives webhooks, so request read-only access to:
+amp-subscribe only receives webhooks, so request read-only access to:
 
 - Metadata
 - Contents
@@ -29,9 +29,10 @@ The relay only receives webhooks, so request read-only access to:
 - Checks
 - Actions, if workflow runs are enabled
 
-Install the app on the repositories whose events should be routed. The relay does not need the
+Install the app on the repositories whose events should be routed. amp-subscribe does not need the
 App private key until it starts calling GitHub's API itself.
 
 Orb subscription requests are separate from GitHub authentication. They use short-lived Amp OIDC
-tokens with audience `urn:lox:amp-github-relay`; the relay must restrict at least one immutable
-Amp workspace, project, or user ID.
+tokens with audience `urn:lox:amp-subscribe`; the service must restrict at least one immutable
+Amp workspace, project, or user ID. The checked-in Fly configuration also accepts the legacy
+`urn:lox:amp-github-relay` audience during the rename migration.
