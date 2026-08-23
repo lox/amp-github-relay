@@ -10,12 +10,27 @@ Amp's durable webhook stores the forwarded event, wakes its orb, and starts a th
   durable webhook handler.
 - `docs/github-app.md`: GitHub App permissions and event configuration.
 
-## Run the relay
+## Authentication
+
+Orb subscription requests do not use a shared API token. For every request, the plugin runs:
+
+```sh
+amp orb id-token --audience urn:lox:amp-github-relay --ttl-seconds 600
+```
+
+The relay verifies Amp's signature, issuer, audience, expiry, and `token_use` claim. It authorizes
+the configured Amp workspace, project, or user IDs and derives subscription ownership from the
+signed `thread_id` claim. A caller cannot select another thread through the request body.
+
+`AMP_GITHUB_RELAY_TOKEN` and `RELAY_API_TOKEN` are not used or supported.
+
+## Run the relay locally
 
 ```sh
 cp .env.example .env
-# Fill every secret and set AMP_WEBHOOK_ALLOWED_HOSTS to the hostname or parent domain
-# used by the capability URL returned by amp.createWebhook.
+# Set GITHUB_WEBHOOK_SECRET and at least one AMP_ALLOWED_* allowlist.
+# Set AMP_WEBHOOK_ALLOWED_HOSTS to the hostname or parent domain used by
+# capability URLs returned by amp.createWebhook.
 bun install
 bun run start
 ```
@@ -40,12 +55,11 @@ The GitHub App webhook URL is `https://amp-pr-relay.fly.dev/github/webhook`.
 ## Install the orb plugin
 
 Copy `plugin/github-relay.ts` into `.amp/plugins/github-relay.ts` in a project, or into the user's
-global Amp plugin directory. The published relay URL and OIDC audience are defaults; override them
-only for another deployment:
+global Amp plugin directory. The plugin needs no secret configuration. The published relay URL and
+OIDC audience are built-in defaults; these optional overrides are only needed for another deployment:
 
 ```text
 AMP_GITHUB_RELAY_URL=https://<relay-host>
-# Optional; this is the default:
 AMP_GITHUB_RELAY_AUDIENCE=urn:lox:amp-github-relay
 ```
 
