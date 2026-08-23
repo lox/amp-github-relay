@@ -73,11 +73,14 @@ async function subscribe(
   return result.subscription
 }
 
+function isPullRequestCommand(command: string): boolean {
+  return /(?:^|[;&|]\s*)gh\s+pr\s+create(?:\s|$)/.test(command)
+}
+
 function createsPullRequest(amp: PluginAPI, event: ToolResultEvent): boolean {
   if (event.status !== "done") return false
-  const command = amp.helpers.shellCommandFromToolCall(event)?.command
-    ?? (event.tool === "async_shell_command" && typeof event.input.command === "string" ? event.input.command : "")
-  if (/(?:^|[;&|]\s*)gh\s+pr\s+create(?:\s|$)/.test(command)) return true
+  const command = amp.helpers.shellCommandFromToolCall(event)?.command ?? ""
+  if (isPullRequestCommand(command)) return true
   const tool = event.tool.toLowerCase()
   return tool.includes("create") && (tool.includes("pull_request") || tool.includes("pull-request"))
 }
@@ -102,12 +105,13 @@ function eventPrompt(payload: Record<string, unknown>): string {
 }
 
 export default async function githubRelay(amp: PluginAPI) {
-  if (process.env.AMP_ORB !== "1" || amp.system.executor.kind !== "remote") {
+  if (process.env.AMP_ORB !== "1") {
     amp.logger.log("GitHub relay is disabled outside an Amp-managed orb")
     return
   }
   const seen = new Set<string>()
-  const pendingAutomaticSubscriptions = new Set<string>()
+  const asyncPullRequestCreations = new Set<string>()
+  const pendingAutomaticSubscriptions = new Map<string, number>()
   const { url: webhookUrl } = await amp.createWebhook({
     key: "github-pr-events",
     handler: async (event, ctx) => {
@@ -124,13 +128,45 @@ export default async function githubRelay(amp: PluginAPI) {
     },
   })
 
+  amp.on("tool.call", async (event) => {
+    if (event.tool === "async_shell_command"
+      && typeof event.input.command === "string"
+      && isPullRequestCommand(event.input.command)) {
+      const branch = await amp.$`git branch --show-current`
+      if (branch.exitCode === 0 && branch.stdout.trim()) {
+        const existing = await amp.$`gh pr list --head ${branch.stdout.trim()} --json url --limit 1`
+        if (existing.exitCode === 0) {
+          try {
+            if ((JSON.parse(existing.stdout) as unknown[]).length === 0) {
+              asyncPullRequestCreations.add(event.toolUseID)
+            }
+          } catch {
+            // Ignore output that does not match gh's documented JSON shape.
+          }
+        }
+      }
+    }
+    return { action: "allow" }
+  })
+
   amp.on("tool.result", (event) => {
-    if (createsPullRequest(amp, event)) pendingAutomaticSubscriptions.add(event.thread.id)
+    if (event.tool === "async_shell_command") {
+      const tracked = asyncPullRequestCreations.delete(event.toolUseID)
+      if (tracked && event.status === "done") pendingAutomaticSubscriptions.set(event.thread.id, 10)
+      return
+    }
+    if (createsPullRequest(amp, event)) pendingAutomaticSubscriptions.set(event.thread.id, 1)
   })
 
   amp.on("agent.end", async (event, ctx) => {
-    if (!pendingAutomaticSubscriptions.delete(event.thread.id)) return
-    const result = await amp.$`gh pr view --json url`
+    const attempts = pendingAutomaticSubscriptions.get(event.thread.id)
+    if (!attempts) return
+    pendingAutomaticSubscriptions.delete(event.thread.id)
+    let result = await amp.$`gh pr view --json url`
+    for (let attempt = 1; result.exitCode !== 0 && attempt < attempts; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      result = await amp.$`gh pr view --json url`
+    }
     if (result.exitCode !== 0) {
       ctx.logger.log("Could not resolve the newly created pull request for automatic subscription")
       return
