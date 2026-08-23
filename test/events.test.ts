@@ -8,6 +8,33 @@ const beforeSha = "b".repeat(40)
 const afterSha = "c".repeat(40)
 
 describe("normalizeGitHubEvent", () => {
+  test("routes branch pushes as commits with bounded metadata", () => {
+    const event = normalizeGitHubEvent("push", "delivery-push", {
+      ref: "refs/heads/main",
+      before: beforeSha,
+      after: afterSha,
+      forced: true,
+      created: false,
+      deleted: false,
+      repository,
+      sender: { login: "pusher" },
+      commits: [{ message: "UNTRUSTED_SENTINEL" }],
+    })[0]
+    expect(event).toMatchObject({
+      githubEvent: "push",
+      event: "commits",
+      action: "push",
+      targetType: "branch",
+      branch: { name: "main", url: "https://github.com/lox/project/tree/main" },
+      detail: { kind: "push", beforeSha, afterSha, forced: true, created: false, deleted: false },
+    })
+    expect(JSON.stringify(event)).not.toContain("UNTRUSTED_SENTINEL")
+    expect(normalizeGitHubEvent("push", "delivery-tag", {
+      ref: "refs/tags/v1.0.0",
+      repository,
+    })).toEqual([])
+  })
+
   test("classifies commits and includes pull request state and commit SHAs", () => {
     const event = normalizeGitHubEvent("pull_request", "delivery-1", {
       action: "synchronize",
@@ -124,7 +151,8 @@ describe("normalizeGitHubEvent", () => {
         pull_requests: [pullRequest, { number: 18 }],
       },
     })
-    expect(events.map((event) => event.pullRequest.number)).toEqual([17, 18])
+    expect(events.filter((event) => event.targetType === "pull_request")
+      .map((event) => event.pullRequest.number)).toEqual([17, 18])
     expect(events.every((event) => event.event === "checks")).toBe(true)
     expect(events[0]?.detail).toEqual({
       kind: "check_run",
@@ -136,6 +164,26 @@ describe("normalizeGitHubEvent", () => {
       appSlug: "github-actions",
     })
     expect(events[1]?.detail).toEqual(events[0]?.detail)
+  })
+
+  test("routes checks to their branch as well as associated pull requests", () => {
+    const events = normalizeGitHubEvent("check_run", "delivery-branch-check", {
+      action: "completed",
+      repository,
+      check_run: {
+        id: 97,
+        status: "completed",
+        conclusion: "success",
+        check_suite: { head_branch: "release/next" },
+        pull_requests: [pullRequest],
+      },
+    })
+    expect(events.map((event) => event.targetType)).toEqual(["pull_request", "branch"])
+    expect(events[1]).toMatchObject({
+      event: "checks",
+      targetType: "branch",
+      branch: { name: "release/next", url: "https://github.com/lox/project/tree/release/next" },
+    })
   })
 
   test("includes check suite state and a synthesized API path", () => {
@@ -262,7 +310,7 @@ describe("normalizeGitHubEvent", () => {
           id: 104,
           name: sentinel,
           display_title: sentinel,
-          head_branch: sentinel,
+          head_branch: "main",
           head_commit: { message: sentinel },
           pull_requests: [pullRequest],
         },

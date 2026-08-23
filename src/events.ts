@@ -54,6 +54,19 @@ function repositoryName(value: unknown): string | null {
     && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value) ? value : null
 }
 
+function branchName(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 255
+    || value === "@" || value.startsWith("/") || value.endsWith("/") || value.endsWith(".")
+    || value.includes("..") || value.includes("//") || value.includes("@{")
+    || /[\u0000-\u0020\u007f~^:?*\\[]/.test(value)
+    || value.split("/").some((part) => part.startsWith(".") || part.endsWith(".lock"))) return null
+  return value
+}
+
+function branchUrl(fullName: string, branch: string): string {
+  return `https://github.com/${fullName}/tree/${branch.split("/").map(encodeURIComponent).join("/")}`
+}
+
 function githubUrl(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length > 2_048 || /[\u0000-\u001f\u007f]/.test(value)) return undefined
   try {
@@ -103,6 +116,17 @@ function pullRequestsFor(eventName: string, payload: JsonObject): JsonObject[] {
   return container.pull_requests.flatMap((value) => (object(value) ? [object(value)!] : []))
 }
 
+function branchFor(eventName: string, payload: JsonObject): string | null {
+  if (eventName === "push") {
+    return typeof payload.ref === "string" && payload.ref.startsWith("refs/heads/")
+      ? branchName(payload.ref.slice("refs/heads/".length))
+      : null
+  }
+  const container = object(payload.check_run) ?? object(payload.check_suite) ?? object(payload.workflow_run)
+  if (!container) return null
+  return branchName(object(container.check_suite)?.head_branch ?? container.head_branch)
+}
+
 function detailFor(eventName: string, payload: JsonObject, fullName: string): RoutedEventDetail | undefined {
   let detail: RoutedEventDetail | undefined
   const pullRequestNumber = positiveNumber(object(payload.pull_request)?.number)
@@ -130,6 +154,19 @@ function detailFor(eventName: string, payload: JsonObject, fullName: string): Ro
     if (requestedReviewer) value.requestedReviewer = requestedReviewer
     if (requestedTeam) value.requestedTeam = requestedTeam
     if (assignee) value.assignee = assignee
+    detail = value
+  } else if (eventName === "push") {
+    const value: Extract<RoutedEventDetail, { kind: "push" }> = { kind: "push" }
+    const beforeSha = sha(payload.before)
+    const afterSha = sha(payload.after)
+    const forced = boolean(payload.forced)
+    const created = boolean(payload.created)
+    const deleted = boolean(payload.deleted)
+    if (beforeSha) value.beforeSha = beforeSha
+    if (afterSha) value.afterSha = afterSha
+    if (forced !== undefined) value.forced = forced
+    if (created !== undefined) value.created = created
+    if (deleted !== undefined) value.deleted = deleted
     detail = value
   } else if (eventName === "pull_request_review") {
     const review = object(payload.review)
@@ -259,22 +296,38 @@ export function normalizeGitHubEvent(
   const sender = principal(object(root.sender)?.login) ?? null
   const occurredAt = new Date().toISOString()
   const detail = detailFor(eventName, root, fullName)
-
-  return pullRequestsFor(eventName, root).flatMap((pullRequest) => {
+  const common = {
+    schemaVersion: 1 as const,
+    deliveryId,
+    githubEvent: eventName,
+    action,
+    repository: { id: repositoryId, fullName },
+    sender,
+    occurredAt,
+    ...(detail ? { detail } : {}),
+  }
+  const pullRequestEvents: RoutedEvent[] = pullRequestsFor(eventName, root).flatMap((pullRequest) => {
     const pullRequestNumber = number(pullRequest.number)
     const event = classify(eventName, action, pullRequest)
     if (pullRequestNumber === null || !event) return []
     return [{
-      schemaVersion: 1,
-      deliveryId,
-      githubEvent: eventName,
+      ...common,
       event,
-      action,
-      repository: { id: repositoryId, fullName },
+      targetType: "pull_request" as const,
       pullRequest: { number: pullRequestNumber, url: `https://github.com/${fullName}/pull/${pullRequestNumber}` },
-      sender,
-      occurredAt,
-      ...(detail ? { detail } : {}),
     }]
   })
+  const branch = branchFor(eventName, root)
+  const branchEvent = eventName === "push" ? "commits"
+    : eventName === "check_run" || eventName === "check_suite" || eventName === "workflow_run" ? "checks"
+      : null
+  return branch && branchEvent ? [
+    ...pullRequestEvents,
+    {
+      ...common,
+      event: branchEvent,
+      targetType: "branch",
+      branch: { name: branch, url: branchUrl(fullName, branch) },
+    },
+  ] : pullRequestEvents
 }

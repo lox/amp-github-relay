@@ -1,0 +1,62 @@
+import { Database } from "bun:sqlite"
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+import { RelayDatabase } from "../src/database"
+
+const directories: string[] = []
+
+afterEach(() => {
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
+})
+
+describe("RelayDatabase", () => {
+  test("migrates existing pull request subscriptions and deliveries", () => {
+    const directory = mkdtempSync(join(tmpdir(), "amp-github-relay-"))
+    directories.push(directory)
+    const path = join(directory, "relay.sqlite")
+    const legacy = new Database(path, { create: true })
+    legacy.exec(`
+      CREATE TABLE subscriptions (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        pull_request_number INTEGER NOT NULL,
+        webhook_url TEXT NOT NULL,
+        events TEXT NOT NULL,
+        behavior TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(thread_id, repository, pull_request_number)
+      );
+      CREATE TABLE deliveries (
+        subscription_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        event TEXT NOT NULL,
+        delivered_at TEXT NOT NULL,
+        PRIMARY KEY(subscription_id, delivery_id, event),
+        FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
+      );
+      INSERT INTO subscriptions VALUES
+        ('sub-1', 'T-test', 'lox/project', 17, 'https://hooks.example.test/secret',
+          '["reviews"]', 'investigate', '2026-08-23T00:00:00.000Z');
+      INSERT INTO deliveries VALUES ('sub-1', 'delivery-1', 'reviews', '2026-08-23T00:01:00.000Z');
+    `)
+    legacy.close()
+
+    const database = new RelayDatabase(path)
+    expect(database.list("T-test")).toEqual([{
+      id: "sub-1",
+      threadId: "T-test",
+      repository: "lox/project",
+      targetType: "pull_request",
+      pullRequestNumber: 17,
+      webhookUrl: "https://hooks.example.test/secret",
+      events: ["reviews"],
+      behavior: "investigate",
+      createdAt: "2026-08-23T00:00:00.000Z",
+    }])
+    expect(database.wasDelivered("sub-1", "delivery-1", "reviews")).toBe(true)
+    database.close()
+  })
+})

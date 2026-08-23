@@ -42,6 +42,14 @@ function validBehavior(value: unknown): value is SubscriptionBehavior {
   return value === "notify" || value === "investigate" || value === "implement"
 }
 
+function validBranch(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 255
+    && value !== "@" && !value.startsWith("/") && !value.endsWith("/") && !value.endsWith(".")
+    && !value.includes("..") && !value.includes("//") && !value.includes("@{")
+    && !/[\u0000-\u0020\u007f~^:?*\\[]/.test(value)
+    && value.split("/").every((part) => !part.startsWith(".") && !part.endsWith(".lock"))
+}
+
 export function createRelay(config: RelayConfig) {
   if (config.databasePath !== ":memory:") mkdirSync(dirname(config.databasePath), { recursive: true })
   const database = new RelayDatabase(config.databasePath)
@@ -57,27 +65,40 @@ export function createRelay(config: RelayConfig) {
     if (request.method === "POST") {
       const input = await request.json().catch(() => null) as Record<string, unknown> | null
       const repository = typeof input?.repository === "string" ? input.repository.toLowerCase() : ""
+      const targetType = input?.targetType ?? (input?.pullRequestNumber === undefined ? undefined : "pull_request")
       const pullRequestNumber = input?.pullRequestNumber
+      const branch = input?.branch
       const webhookUrl = input?.webhookUrl
       const events = input?.events
       const behavior = input?.behavior
       if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) return json({ error: "invalid repository" }, 400)
-      if (!Number.isInteger(pullRequestNumber) || (pullRequestNumber as number) < 1) {
+      if (targetType !== "pull_request" && targetType !== "branch") {
+        return json({ error: "invalid targetType" }, 400)
+      }
+      if (targetType === "pull_request" && (!Number.isInteger(pullRequestNumber) || (pullRequestNumber as number) < 1)) {
         return json({ error: "invalid pullRequestNumber" }, 400)
+      }
+      if (targetType === "branch" && !validBranch(branch)) {
+        return json({ error: "invalid branch" }, 400)
       }
       if (typeof webhookUrl !== "string" || !isAllowedWebhookUrl(webhookUrl, config.allowedWebhookHosts)) {
         return json({ error: "webhookUrl host is not allowed" }, 400)
       }
       if (!validEvents(events)) return json({ error: "invalid events" }, 400)
+      if (targetType === "branch" && events.some((event) => event !== "commits" && event !== "checks")) {
+        return json({ error: "branch subscriptions support only commits and checks" }, 400)
+      }
       if (!validBehavior(behavior)) return json({ error: "invalid behavior" }, 400)
-      const subscription = database.upsert({
+      const common = {
         threadId: identity.threadId,
         repository,
-        pullRequestNumber: pullRequestNumber as number,
         webhookUrl,
         events,
         behavior,
-      })
+      }
+      const subscription = targetType === "pull_request"
+        ? database.upsert({ ...common, targetType, pullRequestNumber: pullRequestNumber as number })
+        : database.upsert({ ...common, targetType, branch: branch as string })
       const { webhookUrl: _, ...safeSubscription } = subscription
       return json({ subscription: safeSubscription }, 201)
     }
@@ -115,9 +136,16 @@ export function createRelay(config: RelayConfig) {
     let removed = 0
 
     for (const event of events) {
+      const target = event.targetType === "pull_request"
+        ? String(event.pullRequest.number)
+        : event.branch.name
+      const idempotencyKey = event.targetType === "pull_request"
+        ? `${deliveryId}:${event.event}:${event.repository.id}:${target}`
+        : `${deliveryId}:${event.event}:${event.repository.id}:branch:${encodeURIComponent(target)}`
       for (const subscription of database.matching(
         event.repository.fullName,
-        event.pullRequest.number,
+        event.targetType,
+        target,
         event.event,
       )) {
         if (database.wasDelivered(subscription.id, deliveryId, event.event)) continue
@@ -128,7 +156,7 @@ export function createRelay(config: RelayConfig) {
             method: "POST",
             headers: {
               "content-type": "application/json",
-              "idempotency-key": `${deliveryId}:${event.event}:${event.repository.id}:${event.pullRequest.number}`,
+              "idempotency-key": idempotencyKey,
             },
             body: forwardedBody,
             signal: AbortSignal.timeout(10_000),
