@@ -102,7 +102,7 @@ function eventPrompt(payload: Record<string, unknown>): string {
 }
 
 export default async function githubRelay(amp: PluginAPI) {
-  if (process.env.AMP_ORB !== "1") {
+  if (amp.system.executor.kind !== "remote") {
     amp.logger.log("GitHub relay is disabled outside an Amp-managed orb")
     return
   }
