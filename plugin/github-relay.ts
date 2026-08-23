@@ -101,6 +101,10 @@ function eventPrompt(payload: Record<string, unknown>): string {
 }
 
 export default async function githubRelay(amp: PluginAPI) {
+  if (process.env.AMP_ORB !== "1") {
+    amp.logger.log("GitHub relay is disabled outside an Amp-managed orb")
+    return
+  }
   const seen = new Set<string>()
   const pendingAutomaticSubscriptions = new Set<string>()
   const { url: webhookUrl } = await amp.createWebhook({
