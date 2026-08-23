@@ -32,7 +32,7 @@ function mapSubscription(row: SubscriptionRow): Subscription {
     : { ...common, targetType: "pull_request", pullRequestNumber: row.pull_request_number ?? Number(row.target) }
 }
 
-export class RelayDatabase {
+export class SubscriptionDatabase {
   readonly sqlite: Database
 
   constructor(path: string) {

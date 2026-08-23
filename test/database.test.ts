@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { RelayDatabase } from "../src/database"
+import { SubscriptionDatabase } from "../src/database"
 
 const directories: string[] = []
 
@@ -11,9 +11,9 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
-describe("RelayDatabase", () => {
+describe("SubscriptionDatabase", () => {
   test("migrates existing pull request subscriptions and deliveries", () => {
-    const directory = mkdtempSync(join(tmpdir(), "amp-github-relay-"))
+    const directory = mkdtempSync(join(tmpdir(), "amp-subscribe-"))
     directories.push(directory)
     const path = join(directory, "relay.sqlite")
     const legacy = new Database(path, { create: true })
@@ -44,7 +44,7 @@ describe("RelayDatabase", () => {
     `)
     legacy.close()
 
-    const database = new RelayDatabase(path)
+    const database = new SubscriptionDatabase(path)
     expect(database.list("T-test")).toEqual([{
       id: "sub-1",
       threadId: "T-test",
@@ -61,10 +61,10 @@ describe("RelayDatabase", () => {
   })
 
   test("supports rollback writes and adopts them after rolling forward", () => {
-    const directory = mkdtempSync(join(tmpdir(), "amp-github-relay-"))
+    const directory = mkdtempSync(join(tmpdir(), "amp-subscribe-"))
     directories.push(directory)
     const path = join(directory, "relay.sqlite")
-    const database = new RelayDatabase(path)
+    const database = new SubscriptionDatabase(path)
     database.upsert({
       threadId: "T-test",
       repository: "lox/project",
@@ -98,7 +98,7 @@ describe("RelayDatabase", () => {
     )
     rollback.close()
 
-    const rolledForward = new RelayDatabase(path)
+    const rolledForward = new SubscriptionDatabase(path)
     expect(rolledForward.matching("lox/project", "pull_request", "18", "reviews"))
       .toHaveLength(1)
     const adopted = rolledForward.upsert({

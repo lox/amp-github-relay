@@ -1,6 +1,7 @@
 import type { PluginAPI, ToolResultEvent } from "@ampcode/plugin"
 
-export const description = "Subscribes an orb thread to GitHub pull request and branch events through amp-github-relay."
+// Keep this filename stable: Amp durable webhook identity is scoped to the plugin and thread.
+export const description = "Lets an Amp thread subscribe to external events. Currently supports GitHub pull requests and branches."
 
 const defaultEvents = [
   "pull_requests",
@@ -34,14 +35,27 @@ function repositoryFromRemote(remote: string): string | null {
   return match?.[1]?.toLowerCase() ?? null
 }
 
-async function relayRequest(amp: PluginAPI, path: string, init: RequestInit = {}): Promise<Response> {
-  const relayUrl = (process.env.AMP_GITHUB_RELAY_URL ?? "https://amp-pr-relay.fly.dev").replace(/\/$/, "")
-  const audience = process.env.AMP_GITHUB_RELAY_AUDIENCE ?? "urn:lox:amp-github-relay"
+export function bridgeConfiguration(environment: Record<string, string | undefined>) {
+  const legacyUrlSelected = !environment.AMP_SUBSCRIBE_URL && Boolean(environment.AMP_GITHUB_RELAY_URL)
+  return {
+    url: (
+      environment.AMP_SUBSCRIBE_URL
+      ?? environment.AMP_GITHUB_RELAY_URL
+      ?? "https://amp-pr-relay.fly.dev"
+    ).replace(/\/$/, ""),
+    audience: environment.AMP_SUBSCRIBE_AUDIENCE
+      ?? environment.AMP_GITHUB_RELAY_AUDIENCE
+      ?? (legacyUrlSelected ? "urn:lox:amp-github-relay" : "urn:lox:amp-subscribe"),
+  }
+}
+
+async function bridgeRequest(amp: PluginAPI, path: string, init: RequestInit = {}): Promise<Response> {
+  const { url, audience } = bridgeConfiguration(process.env)
   const token = await amp.$`amp orb id-token --audience ${audience} --ttl-seconds 600`
   if (token.exitCode !== 0 || !token.stdout.trim()) {
     throw new Error(`Could not mint Amp workload identity: ${token.stderr.trim()}`)
   }
-  const response = await fetch(`${relayUrl}${path}`, {
+  const response = await fetch(`${url}${path}`, {
     ...init,
     headers: {
       authorization: `Bearer ${token.stdout.trim()}`,
@@ -52,7 +66,7 @@ async function relayRequest(amp: PluginAPI, path: string, init: RequestInit = {}
   })
   if (!response.ok) {
     const detail = await response.text()
-    throw new Error(`GitHub relay returned ${response.status}: ${detail}`)
+    throw new Error(`amp-subscribe returned ${response.status}: ${detail}`)
   }
   return response
 }
@@ -64,7 +78,7 @@ async function subscribe(
   events: unknown[],
   behavior: string,
 ): Promise<{ id: string }> {
-  const response = await relayRequest(amp, "/api/subscriptions", {
+  const response = await bridgeRequest(amp, "/api/subscriptions", {
     method: "POST",
     body: JSON.stringify({
       repository: target.repository,
@@ -325,7 +339,7 @@ function promptMetadata(payload: JsonObject): JsonObject {
   if (payload.schemaVersion !== 1 || !deliveryId || !githubEvent || !event || !action
     || !repositoryId || !fullName || !validTarget || !validEventTarget
     || !eventMatchesGitHubEvent(githubEvent, event, action)) {
-    throw new Error("Rejected malformed GitHub relay event")
+    throw new Error("Rejected malformed GitHub event")
   }
 
   const metadata: JsonObject = {
@@ -341,7 +355,7 @@ function promptMetadata(payload: JsonObject): JsonObject {
   }
   const sender = principal(payload.sender)
   const detail = sanitizeDetail(payload.detail, fullName, pullRequestNumber)
-  if (detail && detail.kind !== githubEvent) throw new Error("Rejected malformed GitHub relay event")
+  if (detail && detail.kind !== githubEvent) throw new Error("Rejected malformed GitHub event")
   if (sender) metadata.sender = sender
   if (detail) metadata.detail = detail
   return metadata
@@ -478,7 +492,7 @@ function eventSummary(metadata: JsonObject): string[] {
 
 export function eventPrompt(value: unknown): string {
   const payload = object(value)
-  if (!payload) throw new Error("Rejected malformed GitHub relay event")
+  if (!payload) throw new Error("Rejected malformed GitHub event")
   const metadata = promptMetadata(payload)
   const checkTrigger = metadata.event === "checks"
   const behavior = enumValue(payload.behavior, ["notify", "investigate", "implement"] as const) ?? "investigate"
@@ -499,9 +513,9 @@ export function eventPrompt(value: unknown): string {
   ].join("\n")
 }
 
-export default async function githubRelay(amp: PluginAPI) {
+export default async function ampSubscribe(amp: PluginAPI) {
   if (process.env.AMP_ORB !== "1") {
-    amp.logger.log("GitHub relay is disabled outside an Amp-managed orb")
+    amp.logger.log("amp-subscribe is disabled outside an Amp-managed orb")
     return
   }
   const seen = new Set<string>()
@@ -601,7 +615,7 @@ export default async function githubRelay(amp: PluginAPI) {
     description: "List GitHub pull requests and branches watched by the current thread.",
     inputSchema: { type: "object", properties: {} },
     async execute(_input, ctx) {
-      const response = await relayRequest(amp, "/api/subscriptions")
+      const response = await bridgeRequest(amp, "/api/subscriptions")
       return JSON.stringify(await response.json(), null, 2)
     },
   })
@@ -617,7 +631,7 @@ export default async function githubRelay(amp: PluginAPI) {
     },
     async execute(input, ctx) {
       if (typeof input.id !== "string") throw new Error("Subscription ID is required")
-      await relayRequest(amp, "/api/subscriptions", {
+      await bridgeRequest(amp, "/api/subscriptions", {
         method: "DELETE",
         body: JSON.stringify({ id: input.id }),
       })

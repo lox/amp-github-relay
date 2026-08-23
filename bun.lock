@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "amp-github-relay",
+      "name": "amp-subscribe",
       "dependencies": {
         "jose": "^6.2.10",
       },

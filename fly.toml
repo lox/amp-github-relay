@@ -7,7 +7,7 @@ primary_region = "syd"
 [env]
   PORT = "3000"
   DATABASE_PATH = "/data/relay.sqlite"
-  AMP_OIDC_AUDIENCE = "urn:lox:amp-github-relay"
+  AMP_OIDC_AUDIENCE = "urn:lox:amp-subscribe,urn:lox:amp-github-relay"
   AMP_WEBHOOK_ALLOWED_HOSTS = "ampcode.com"
 
 [http_service]
