@@ -56,6 +56,7 @@ function repositoryName(value: unknown): string | null {
 
 function branchName(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0 || value.length > 255
+    || !/^[!-~]+$/.test(value)
     || value === "@" || value.startsWith("/") || value.endsWith("/") || value.endsWith(".")
     || value.includes("..") || value.includes("//") || value.includes("@{")
     || /[\u0000-\u0020\u007f~^:?*\\[]/.test(value)
@@ -116,7 +117,7 @@ function pullRequestsFor(eventName: string, payload: JsonObject): JsonObject[] {
   return container.pull_requests.flatMap((value) => (object(value) ? [object(value)!] : []))
 }
 
-function branchFor(eventName: string, payload: JsonObject): string | null {
+function branchFor(eventName: string, payload: JsonObject, repositoryId: number): string | null {
   if (eventName === "push") {
     return typeof payload.ref === "string" && payload.ref.startsWith("refs/heads/")
       ? branchName(payload.ref.slice("refs/heads/".length))
@@ -124,7 +125,11 @@ function branchFor(eventName: string, payload: JsonObject): string | null {
   }
   const container = object(payload.check_run) ?? object(payload.check_suite) ?? object(payload.workflow_run)
   if (!container) return null
-  return branchName(object(container.check_suite)?.head_branch ?? container.head_branch)
+  const checkSuite = object(container.check_suite)
+  const headRepository = object(checkSuite?.head_repository ?? container.head_repository)
+  return number(headRepository?.id) === repositoryId
+    ? branchName(checkSuite?.head_branch ?? container.head_branch)
+    : null
 }
 
 function detailFor(eventName: string, payload: JsonObject, fullName: string): RoutedEventDetail | undefined {
@@ -317,7 +322,7 @@ export function normalizeGitHubEvent(
       pullRequest: { number: pullRequestNumber, url: `https://github.com/${fullName}/pull/${pullRequestNumber}` },
     }]
   })
-  const branch = branchFor(eventName, root)
+  const branch = branchFor(eventName, root, repositoryId)
   const branchEvent = eventName === "push" ? "commits"
     : eventName === "check_run" || eventName === "check_suite" || eventName === "workflow_run" ? "checks"
       : null

@@ -125,6 +125,7 @@ function matchingString(value: unknown, pattern: RegExp, maximumLength: number):
 
 function branchName(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0 || value.length > 255
+    || !/^[!-~]+$/.test(value)
     || value === "@" || value.startsWith("/") || value.endsWith("/") || value.endsWith(".")
     || value.includes("..") || value.includes("//") || value.includes("@{")
     || /[\u0000-\u0020\u007f~^:?*\\[]/.test(value)
