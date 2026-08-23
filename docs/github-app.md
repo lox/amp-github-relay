@@ -10,6 +10,7 @@ Create one GitHub App for the relay deployment.
 
 Subscribe to these repository events:
 
+- Push, for branch subscriptions
 - Pull requests
 - Pull request reviews
 - Pull request review comments
@@ -19,9 +20,10 @@ Subscribe to these repository events:
 
 ## Permissions
 
-The MVP only receives webhooks, so request read-only access to:
+The relay only receives webhooks, so request read-only access to:
 
 - Metadata
+- Contents
 - Pull requests
 - Issues
 - Checks

@@ -41,6 +41,14 @@ export type RoutedEventDetail =
       assignee?: string
     }
   | {
+      kind: "push"
+      beforeSha?: string
+      afterSha?: string
+      forced?: boolean
+      created?: boolean
+      deleted?: boolean
+    }
+  | {
       kind: "pull_request_review"
       id: number
       url: string
@@ -93,18 +101,22 @@ export type RoutedEventDetail =
       headSha?: string
     }
 
-export interface Subscription {
+interface SubscriptionBase {
   id: string
   threadId: string
   repository: string
-  pullRequestNumber: number
   webhookUrl: string
   events: SubscriptionEvent[]
   behavior: SubscriptionBehavior
   createdAt: string
 }
 
-export interface RoutedEvent {
+export type Subscription = SubscriptionBase & (
+  | { targetType: "pull_request"; pullRequestNumber: number }
+  | { targetType: "branch"; branch: string }
+)
+
+interface RoutedEventBase {
   schemaVersion: 1
   deliveryId: string
   githubEvent: string
@@ -114,11 +126,12 @@ export interface RoutedEvent {
     id: number
     fullName: string
   }
-  pullRequest: {
-    number: number
-    url: string
-  }
   sender: string | null
   occurredAt: string
   detail?: RoutedEventDetail
 }
+
+export type RoutedEvent = RoutedEventBase & (
+  | { targetType: "pull_request"; pullRequest: { number: number; url: string } }
+  | { targetType: "branch"; branch: { name: string; url: string } }
+)

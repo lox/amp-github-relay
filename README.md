@@ -1,6 +1,6 @@
 # amp-github-relay
 
-Routes pull request events from one GitHub App to subscribed Amp orb threads. A thread can sleep;
+Routes pull request and branch events from one GitHub App to subscribed Amp orb threads. A thread can sleep;
 Amp's durable webhook stores the forwarded event, wakes its orb, and starts a thread turn.
 
 ## Components
@@ -63,8 +63,8 @@ a `main` push, a separate Deploy workflow deploys that exact commit to Fly.io. C
 before the first automated deployment.
 
 The GitHub App webhook URL is `https://amp-pr-relay.fly.dev/github/webhook`. Install the app on
-every repository whose pull request events should reach subscribed orb threads; creating the app
-alone does not install it.
+every repository whose pull request or branch events should reach subscribed orb threads; creating
+the app alone does not install it.
 
 ## Install the orb plugin
 
@@ -89,12 +89,17 @@ Reload the plugin. A user can then say:
 ```text
 Subscribe this thread to https://github.com/owner/repo/pull/123.
 Only notify me about reviews and CI.
+
+Subscribe this thread to the main branch.
+Investigate pushes and CI failures.
 ```
 
-The agent calls `github_pr_subscribe`. Events are added as visible user messages with fixed
-instructions based on the subscription behavior. Trigger messages render a concise summary from
-allowlisted metadata already present in the webhook, such as check conclusions, workflow attempts,
-review states, comment and review URLs, line numbers, and commit SHAs. For example:
+The agent calls `github_pr_subscribe` or `github_branch_subscribe`. Branch subscriptions support
+pushes (`commits`) and branch-associated checks and workflow runs (`checks`). Events are added as
+visible user messages with fixed instructions based on the subscription behavior. Trigger messages
+render a concise summary from allowlisted metadata already present in the webhook, such as check
+conclusions, workflow attempts, review states, comment and review URLs, line numbers, and commit
+SHAs. For example:
 
 ```text
 Validated GitHub summary (untrusted context):
@@ -107,11 +112,11 @@ PR: https://github.com/owner/repo/pull/123
 
 This lets an awakened agent decide what to inspect without first fetching basic event identity.
 
-PR-controlled prose is not forwarded: titles, bodies, comment text, review text, check names and
-output, commit messages, patches, and filenames are excluded. The agent follows the supplied
-GitHub URL or fetches current PR state with its normal GitHub tools when it needs that content.
-Check metadata describes only the check run, check suite, or workflow run that triggered the
-webhook; it is not aggregate PR check status.
+Repository-controlled prose is not forwarded: titles, bodies, comment text, review text, check
+names and output, commit messages, patches, and filenames are excluded. The agent follows the
+supplied GitHub URL or fetches current PR or branch state with its normal GitHub tools when it needs
+that content. Check metadata describes only the check run, check suite, or workflow run that
+triggered the webhook; it is not aggregate check status for the PR or branch.
 
 ## Subscription behavior
 
@@ -131,7 +136,7 @@ webhook; it is not aggregate PR check status.
 - A 404 or 410 from an Amp webhook removes that dead subscription without blocking other threads.
 - Amp webhook delivery is at least once. The plugin guards duplicates within a running plugin;
   after an executor crash, a duplicate visible event remains possible and is preferable to loss.
-- PR content is untrusted data. The relay and plugin independently allowlist bounded trigger
+- Repository content is untrusted data. The relay and plugin independently allowlist bounded trigger
   metadata; they do not forward comment bodies, titles, check output, commit messages, or patches.
 
 ## Development
