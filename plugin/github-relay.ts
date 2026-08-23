@@ -41,7 +41,7 @@ export function bridgeConfiguration(environment: Record<string, string | undefin
     url: (
       environment.AMP_SUBSCRIBE_URL
       ?? environment.AMP_GITHUB_RELAY_URL
-      ?? "https://amp-pr-relay.fly.dev"
+      ?? "https://lox-amp-subscribe.fly.dev"
     ).replace(/\/$/, ""),
     audience: environment.AMP_SUBSCRIBE_AUDIENCE
       ?? environment.AMP_GITHUB_RELAY_AUDIENCE

@@ -134,9 +134,8 @@ legacy audience by default.
 
 ### Fly.io
 
-The checked-in `fly.toml` retains the existing `amp-pr-relay` Fly app and `relay.sqlite` volume path
-so renaming the project does not replace deployed infrastructure or lose subscriptions. Before the
-first deploy, set the GitHub webhook secret and at least one Amp identity allowlist:
+The checked-in `fly.toml` deploys `lox-amp-subscribe` with a persistent `relay.sqlite` volume. Before
+the first deploy, set the GitHub webhook secret and at least one Amp identity allowlist:
 
 ```sh
 mise exec -- flyctl secrets set GITHUB_WEBHOOK_SECRET=... AMP_ALLOWED_WORKSPACE_IDS=...
@@ -147,11 +146,11 @@ mise run deploy
 Create an app-scoped CI deploy token with:
 
 ```sh
-mise exec -- flyctl tokens create deploy --app amp-pr-relay
+mise exec -- flyctl tokens create deploy --app lox-amp-subscribe
 ```
 
 Save the full token as the repository's `FLY_API_TOKEN` Actions secret. Configure the GitHub App
-webhook as `https://amp-pr-relay.fly.dev/github/webhook` and install the app on every repository
+webhook as `https://lox-amp-subscribe.fly.dev/github/webhook` and install the app on every repository
 whose events should reach Amp. See [GitHub App setup](docs/github-app.md) for the event and
 permission list.
 

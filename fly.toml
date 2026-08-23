@@ -1,4 +1,4 @@
-app = "amp-pr-relay"
+app = "lox-amp-subscribe"
 primary_region = "syd"
 
 [build]

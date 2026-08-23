@@ -4,7 +4,7 @@ Create one GitHub App for the amp-subscribe deployment.
 
 ## Webhook
 
-- URL: `https://<relay-host>/github/webhook`
+- URL: `https://lox-amp-subscribe.fly.dev/github/webhook`
 - Secret: the value deployed as `GITHUB_WEBHOOK_SECRET`
 - Active: enabled
 

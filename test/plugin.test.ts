@@ -18,7 +18,7 @@ describe("bridgeConfiguration", () => {
 
   test("uses the new defaults and honors explicit audience configuration", () => {
     expect(bridgeConfiguration({})).toEqual({
-      url: "https://amp-pr-relay.fly.dev",
+      url: "https://lox-amp-subscribe.fly.dev",
       audience: "urn:lox:amp-subscribe",
     })
     expect(bridgeConfiguration({
