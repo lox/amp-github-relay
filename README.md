@@ -56,14 +56,17 @@ even if its orb was asleep.
 The repository is currently organized as:
 
 - `src/`: subscription API, SQLite storage, GitHub event adapter, and Amp webhook delivery.
-- `plugin/amp-subscribe.ts`: Amp plugin with the GitHub subscribe, list, and unsubscribe tools.
+- `plugin/github-relay.ts`: amp-subscribe's GitHub adapter plugin. Its compatibility filename keeps
+  existing durable webhook URLs stable.
 - `docs/github-app.md`: GitHub App permissions and webhook setup.
 
 ## Using the GitHub integration
 
-Install `plugin/amp-subscribe.ts` as `.amp/plugins/amp-subscribe.ts` in a project or in your global
-Amp plugin directory, then reload plugins. The plugin works in Amp-managed orbs, where durable
-webhooks can wake a thread.
+Install `plugin/github-relay.ts` as `.amp/plugins/github-relay.ts` in a project or in your global Amp
+plugin directory, then reload plugins. Keep this filename when upgrading an existing installation:
+Amp scopes durable webhook identity to the plugin, so renaming the installed file would orphan
+existing subscriptions. The plugin works in Amp-managed orbs, where durable webhooks can wake a
+thread.
 
 Ask Amp in natural language:
 

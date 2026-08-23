@@ -1,5 +1,6 @@
 import type { PluginAPI, ToolResultEvent } from "@ampcode/plugin"
 
+// Keep this filename stable: Amp durable webhook identity is scoped to the plugin and thread.
 export const description = "Lets an Amp thread subscribe to external events. Currently supports GitHub pull requests and branches."
 
 const defaultEvents = [

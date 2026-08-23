@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { eventPrompt, pullRequestFromShellResult } from "../plugin/amp-subscribe"
+import { eventPrompt, pullRequestFromShellResult } from "../plugin/github-relay"
 
 const success = (output: unknown) => ({
   status: "done" as const,
