@@ -70,7 +70,8 @@ long-lived relay credential is stored in the orb. A successful `gh pr create` pe
 thread is detected and automatically subscribed with `investigate` behavior. The plugin disables
 itself outside an Amp-managed orb because durable webhooks are not available in local executors.
 
-Reload the plugin. A user can then say:
+Reload the plugin. After publishing or reloading a global User Plugin, start a fresh thread if its
+tools are not available in an existing thread. A user can then say:
 
 ```text
 Subscribe this thread to https://github.com/owner/repo/pull/123.
