@@ -126,10 +126,10 @@ function branchFor(eventName: string, payload: JsonObject, repositoryId: number)
   const container = object(payload.check_run) ?? object(payload.check_suite) ?? object(payload.workflow_run)
   if (!container) return null
   const checkSuite = object(container.check_suite)
+  const branch = branchName(checkSuite?.head_branch ?? container.head_branch)
+  if (eventName !== "workflow_run") return branch
   const headRepository = object(checkSuite?.head_repository ?? container.head_repository)
-  return number(headRepository?.id) === repositoryId
-    ? branchName(checkSuite?.head_branch ?? container.head_branch)
-    : null
+  return number(headRepository?.id) === repositoryId ? branch : null
 }
 
 function detailFor(eventName: string, payload: JsonObject, fullName: string): RoutedEventDetail | undefined {

@@ -178,7 +178,7 @@ describe("normalizeGitHubEvent", () => {
         id: 97,
         status: "completed",
         conclusion: "success",
-        check_suite: { head_branch: "release/next", head_repository: repository },
+        check_suite: { head_branch: "release/next" },
         pull_requests: [pullRequest],
       },
     })
@@ -188,6 +188,16 @@ describe("normalizeGitHubEvent", () => {
       targetType: "branch",
       branch: { name: "release/next", url: "https://github.com/lox/project/tree/release/next" },
     })
+
+    expect(normalizeGitHubEvent("check_suite", "delivery-branch-suite", {
+      action: "completed",
+      repository,
+      check_suite: { id: 98, head_branch: "release/next", pull_requests: [] },
+    })).toEqual([expect.objectContaining({
+      event: "checks",
+      targetType: "branch",
+      branch: { name: "release/next", url: "https://github.com/lox/project/tree/release/next" },
+    })])
   })
 
   test("does not route workflow runs from a same-named fork branch", () => {
