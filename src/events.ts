@@ -1,9 +1,11 @@
-import type {
-  CheckConclusion,
-  CheckStatus,
-  RoutedEvent,
-  RoutedEventDetail,
-  SubscriptionEvent,
+import {
+  checkConclusions,
+  checkStatuses,
+  type CheckConclusion,
+  type CheckStatus,
+  type RoutedEvent,
+  type RoutedEventDetail,
+  type SubscriptionEvent,
 } from "./types"
 
 type JsonObject = Record<string, unknown>
@@ -71,19 +73,6 @@ function githubUrl(value: unknown): string | undefined {
     return undefined
   }
 }
-
-const checkStatuses = ["requested", "waiting", "pending", "queued", "in_progress", "completed"] as const
-const checkConclusions = [
-  "action_required",
-  "cancelled",
-  "failure",
-  "neutral",
-  "skipped",
-  "stale",
-  "startup_failure",
-  "success",
-  "timed_out",
-] as const
 
 function checkStatus(value: unknown): CheckStatus | undefined {
   return enumValue(value, checkStatuses)

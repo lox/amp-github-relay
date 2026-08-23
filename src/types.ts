@@ -12,17 +12,20 @@ export const subscriptionEvents = [
 export type SubscriptionEvent = (typeof subscriptionEvents)[number]
 export type SubscriptionBehavior = "notify" | "investigate" | "implement"
 
-export type CheckStatus = "requested" | "waiting" | "pending" | "queued" | "in_progress" | "completed"
-export type CheckConclusion =
-  | "action_required"
-  | "cancelled"
-  | "failure"
-  | "neutral"
-  | "skipped"
-  | "stale"
-  | "startup_failure"
-  | "success"
-  | "timed_out"
+export const checkStatuses = ["requested", "waiting", "pending", "queued", "in_progress", "completed"] as const
+export const checkConclusions = [
+  "action_required",
+  "cancelled",
+  "failure",
+  "neutral",
+  "skipped",
+  "stale",
+  "startup_failure",
+  "success",
+  "timed_out",
+] as const
+export type CheckStatus = (typeof checkStatuses)[number]
+export type CheckConclusion = (typeof checkConclusions)[number]
 
 export type RoutedEventDetail =
   | {
