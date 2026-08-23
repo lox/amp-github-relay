@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: fly-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
