@@ -66,9 +66,11 @@ AMP_GITHUB_RELAY_AUDIENCE=urn:lox:amp-github-relay
 ```
 
 The plugin mints a ten-minute Amp workload identity token for each subscription API request. No
-long-lived relay credential is stored in the orb. A successful `gh pr create` performed by the
-thread is detected and automatically subscribed with `investigate` behavior. The plugin disables
-itself outside an Amp-managed orb because durable webhooks are not available in local executors.
+long-lived relay credential is stored in the orb. A successful direct `gh pr create` performed by
+a synchronous shell tool is automatically subscribed with `investigate` behavior when its result
+contains one pull request URL. After asynchronous or compound shell commands, the agent uses the
+subscription tool with the created PR URL instead of guessing from mutable checkout state. The
+plugin disables itself outside an Amp-managed orb because durable webhooks belong to orb threads.
 
 Reload the plugin. A user can then say:
 

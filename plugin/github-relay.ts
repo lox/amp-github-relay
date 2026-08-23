@@ -1,5 +1,4 @@
 import type { PluginAPI, ToolResultEvent } from "@ampcode/plugin"
-import { resolve } from "node:path"
 
 export const description = "Subscribes an orb thread to GitHub pull request events through amp-github-relay."
 
@@ -74,26 +73,25 @@ async function subscribe(
   return result.subscription
 }
 
-function isPullRequestCommand(command: string): boolean {
-  return /(?:^|[;&|]\s*)gh\s+pr\s+create(?:\s|$)/.test(command)
-}
+export function pullRequestFromShellResult(
+  command: string | null,
+  event: Pick<ToolResultEvent, "status" | "output">,
+): { repository: string; number: number } | null {
+  if (event.status !== "done" || !command || !/^\s*gh\s+pr\s+create(?:\s|$)/.test(command)) return null
+  if (typeof event.output !== "object" || event.output === null) return null
+  const result = event.output as Record<string, unknown>
+  if (result.exitCode !== 0 || typeof result.output !== "string") return null
 
-function commandOption(command: string, option: string): string | null {
-  const match = command.match(new RegExp(`(?:^|\\s)--${option}(?:=|\\s+)(?:"([^"]+)"|'([^']+)'|([^\\s;&|]+))`))
-  return match?.[1] ?? match?.[2] ?? match?.[3] ?? null
-}
-
-function commandDirectory(command: string, directory: string): string {
-  const match = command.match(/(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))\s*&&\s*gh\s+pr\s+create/)
-  return resolve(directory, match?.[1] ?? match?.[2] ?? match?.[3] ?? ".")
-}
-
-function createsPullRequest(amp: PluginAPI, event: ToolResultEvent): boolean {
-  if (event.status !== "done") return false
-  const command = amp.helpers.shellCommandFromToolCall(event)?.command ?? ""
-  if (isPullRequestCommand(command)) return true
-  const tool = event.tool.toLowerCase()
-  return tool.includes("create") && (tool.includes("pull_request") || tool.includes("pull-request"))
+  const targets = new Map<string, { repository: string; number: number }>()
+  for (const line of result.output.split("\n")) {
+    try {
+      const target = parsePullRequest(line.trim(), null)
+      targets.set(`${target.repository}#${target.number}`, target)
+    } catch {
+      // Ignore output lines that are not exact GitHub pull request URLs.
+    }
+  }
+  return targets.size === 1 ? [...targets.values()][0] : null
 }
 
 function eventPrompt(payload: Record<string, unknown>): string {
@@ -121,8 +119,6 @@ export default async function githubRelay(amp: PluginAPI) {
     return
   }
   const seen = new Set<string>()
-  const asyncPullRequestCreations = new Map<string, { repository: string; head: string }>()
-  const pendingAutomaticSubscriptions = new Set<string>()
   const { url: webhookUrl } = await amp.createWebhook({
     key: "github-pr-events",
     handler: async (event, ctx) => {
@@ -139,88 +135,11 @@ export default async function githubRelay(amp: PluginAPI) {
     },
   })
 
-  amp.on("tool.call", async (event) => {
-    if (event.tool === "async_shell_command"
-      && typeof event.input.command === "string"
-      && isPullRequestCommand(event.input.command)) {
-      const directory = commandDirectory(
-        event.input.command,
-        typeof event.input.dir === "string" ? event.input.dir : ".",
-      )
-      const repositoryOption = commandOption(event.input.command, "repo")
-      const headOption = commandOption(event.input.command, "head")
-      const [remote, branch] = await Promise.all([
-        repositoryOption
-          ? amp.$`gh repo view ${repositoryOption} --json nameWithOwner`
-          : amp.$`git -C ${directory} remote get-url origin`,
-        amp.$`git -C ${directory} branch --show-current`,
-      ])
-      if (remote.exitCode === 0 && (headOption || (branch.exitCode === 0 && branch.stdout.trim()))) {
-        try {
-          const repository = repositoryOption
-            ? (JSON.parse(remote.stdout) as { nameWithOwner?: unknown }).nameWithOwner
-            : repositoryFromRemote(remote.stdout)
-          if (typeof repository === "string") {
-            const head = headOption ?? branch.stdout.trim()
-            const existing = await amp.$`gh pr list --repo ${repository} --head ${head} --json url --limit 1`
-            if (existing.exitCode === 0 && (JSON.parse(existing.stdout) as unknown[]).length === 0) {
-              asyncPullRequestCreations.set(event.toolUseID, { repository, head })
-            }
-          }
-        } catch {
-          // Ignore output that does not match gh's documented JSON shape.
-        }
-      }
-    }
-    return { action: "allow" }
-  })
-
-  amp.on("tool.result", (event) => {
-    if (event.tool === "async_shell_command") {
-      const target = asyncPullRequestCreations.get(event.toolUseID)
-      asyncPullRequestCreations.delete(event.toolUseID)
-      if (target && event.status === "done") {
-        void (async () => {
-          const lease = await amp.system.executor.keepAlive()
-          try {
-            const delays = [0, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 60_000]
-            for (const delay of delays) {
-              if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
-              const result = await amp.$`gh pr list --repo ${target.repository} --head ${target.head} --json url --limit 1`
-              if (result.exitCode === 0) {
-                const url = (JSON.parse(result.stdout) as Array<{ url?: unknown }>)[0]?.url
-                if (typeof url === "string") {
-                  const pullRequest = parsePullRequest(url, null)
-                  await subscribe(amp, webhookUrl, pullRequest, defaultEvents, "investigate")
-                  await amp.ui.notify(`Subscribed this thread to ${pullRequest.repository}#${pullRequest.number}.`).catch(() => undefined)
-                  return
-                }
-              }
-            }
-            amp.logger.log("Could not resolve the asynchronously created pull request for automatic subscription")
-          } catch (error) {
-            amp.logger.log("Automatic pull request subscription failed", error)
-          } finally {
-            lease.unsubscribe()
-          }
-        })().catch((error) => amp.logger.log("Automatic pull request subscription failed", error))
-      }
-      return
-    }
-    if (createsPullRequest(amp, event)) pendingAutomaticSubscriptions.add(event.thread.id)
-  })
-
-  amp.on("agent.end", async (event, ctx) => {
-    if (!pendingAutomaticSubscriptions.delete(event.thread.id)) return
-    const result = await amp.$`gh pr view --json url`
-    if (result.exitCode !== 0) {
-      ctx.logger.log("Could not resolve the newly created pull request for automatic subscription")
-      return
-    }
+  amp.on("tool.result", async (event, ctx) => {
+    const command = amp.helpers.shellCommandFromToolCall(event)?.command ?? null
+    const target = pullRequestFromShellResult(command, event)
+    if (!target) return
     try {
-      const url = (JSON.parse(result.stdout) as { url?: unknown }).url
-      if (typeof url !== "string") throw new Error("gh pr view did not return a URL")
-      const target = parsePullRequest(url, null)
       await subscribe(amp, webhookUrl, target, defaultEvents, "investigate")
       await ctx.ui.notify(`Subscribed this thread to ${target.repository}#${target.number}.`).catch(() => undefined)
     } catch (error) {
@@ -231,7 +150,7 @@ export default async function githubRelay(amp: PluginAPI) {
   amp.registerTool({
     name: "github_pr_subscribe",
     title: "Subscribe to pull request",
-    description: "Subscribe the current orb thread to events for one GitHub pull request. Use when the user asks to watch, monitor, or subscribe to a PR.",
+    description: "Subscribe the current orb thread to one GitHub pull request. Use when the user asks to watch a PR, or after creating one when automatic subscription did not occur, especially after async_shell_command completion.",
     inputSchema: {
       type: "object",
       properties: {
