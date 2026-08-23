@@ -129,7 +129,8 @@ Set the service's `AMP_OIDC_AUDIENCE` to the same audience. The old
 `AMP_GITHUB_RELAY_URL` and `AMP_GITHUB_RELAY_AUDIENCE` plugin variables remain accepted for
 compatibility. `AMP_OIDC_AUDIENCE` accepts a comma-separated list during a migration; the checked-in
 Fly configuration accepts both the new and legacy audiences so existing plugin installations keep
-working.
+working. A self-hosted plugin configured with only `AMP_GITHUB_RELAY_URL` continues to use the
+legacy audience by default.
 
 ### Fly.io
 

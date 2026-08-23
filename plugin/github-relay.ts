@@ -35,20 +35,27 @@ function repositoryFromRemote(remote: string): string | null {
   return match?.[1]?.toLowerCase() ?? null
 }
 
+export function bridgeConfiguration(environment: Record<string, string | undefined>) {
+  const legacyUrlSelected = !environment.AMP_SUBSCRIBE_URL && Boolean(environment.AMP_GITHUB_RELAY_URL)
+  return {
+    url: (
+      environment.AMP_SUBSCRIBE_URL
+      ?? environment.AMP_GITHUB_RELAY_URL
+      ?? "https://amp-pr-relay.fly.dev"
+    ).replace(/\/$/, ""),
+    audience: environment.AMP_SUBSCRIBE_AUDIENCE
+      ?? environment.AMP_GITHUB_RELAY_AUDIENCE
+      ?? (legacyUrlSelected ? "urn:lox:amp-github-relay" : "urn:lox:amp-subscribe"),
+  }
+}
+
 async function bridgeRequest(amp: PluginAPI, path: string, init: RequestInit = {}): Promise<Response> {
-  const bridgeUrl = (
-    process.env.AMP_SUBSCRIBE_URL
-    ?? process.env.AMP_GITHUB_RELAY_URL
-    ?? "https://amp-pr-relay.fly.dev"
-  ).replace(/\/$/, "")
-  const audience = process.env.AMP_SUBSCRIBE_AUDIENCE
-    ?? process.env.AMP_GITHUB_RELAY_AUDIENCE
-    ?? "urn:lox:amp-subscribe"
+  const { url, audience } = bridgeConfiguration(process.env)
   const token = await amp.$`amp orb id-token --audience ${audience} --ttl-seconds 600`
   if (token.exitCode !== 0 || !token.stdout.trim()) {
     throw new Error(`Could not mint Amp workload identity: ${token.stderr.trim()}`)
   }
-  const response = await fetch(`${bridgeUrl}${path}`, {
+  const response = await fetch(`${url}${path}`, {
     ...init,
     headers: {
       authorization: `Bearer ${token.stdout.trim()}`,

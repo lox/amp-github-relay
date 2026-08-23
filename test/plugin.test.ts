@@ -1,9 +1,35 @@
 import { describe, expect, test } from "bun:test"
-import { eventPrompt, pullRequestFromShellResult } from "../plugin/github-relay"
+import { bridgeConfiguration, eventPrompt, pullRequestFromShellResult } from "../plugin/github-relay"
 
 const success = (output: unknown) => ({
   status: "done" as const,
   output,
+})
+
+describe("bridgeConfiguration", () => {
+  test("keeps the legacy audience for a legacy self-hosted URL", () => {
+    expect(bridgeConfiguration({
+      AMP_GITHUB_RELAY_URL: "https://legacy.example/",
+    })).toEqual({
+      url: "https://legacy.example",
+      audience: "urn:lox:amp-github-relay",
+    })
+  })
+
+  test("uses the new defaults and honors explicit audience configuration", () => {
+    expect(bridgeConfiguration({})).toEqual({
+      url: "https://amp-pr-relay.fly.dev",
+      audience: "urn:lox:amp-subscribe",
+    })
+    expect(bridgeConfiguration({
+      AMP_SUBSCRIBE_URL: "https://subscribe.example",
+      AMP_GITHUB_RELAY_URL: "https://legacy.example",
+      AMP_GITHUB_RELAY_AUDIENCE: "urn:custom:legacy-name",
+    })).toEqual({
+      url: "https://subscribe.example",
+      audience: "urn:custom:legacy-name",
+    })
+  })
 })
 
 describe("pullRequestFromShellResult", () => {
