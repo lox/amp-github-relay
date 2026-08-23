@@ -80,13 +80,22 @@ Only notify me about reviews and CI.
 ```
 
 The agent calls `github_pr_subscribe`. Events are added as visible user messages with fixed
-instructions based on the subscription behavior. PR-controlled text is not forwarded in the
-trigger message; the awakened agent fetches current PR state using its normal GitHub tools.
+instructions based on the subscription behavior. Trigger messages include allowlisted metadata
+that is already present in the webhook, such as check conclusions, workflow attempts, review
+states, comment and review URLs, line numbers, and commit SHAs. This lets an awakened agent decide
+what to inspect without first fetching basic event identity.
+
+PR-controlled prose is not forwarded: titles, bodies, comment text, review text, check names and
+output, commit messages, patches, and filenames are excluded. The agent follows the supplied
+GitHub URL or fetches current PR state with its normal GitHub tools when it needs that content.
+Check metadata describes only the check run, check suite, or workflow run that triggered the
+webhook; it is not aggregate PR check status.
 
 ## Subscription behavior
 
 - `notify`: summarize only; do not edit files or external state.
-- `investigate` (default): inspect and prepare a response without changing external state.
+- `investigate` (default): triage the event metadata, inspect only the current state needed, and
+  prepare a response without changing external state.
 - `implement`: make and verify local changes, but do not push without prior explicit approval.
 
 ## Security and delivery
@@ -100,7 +109,8 @@ trigger message; the awakened agent fetches current PR state using its normal Gi
 - A 404 or 410 from an Amp webhook removes that dead subscription without blocking other threads.
 - Amp webhook delivery is at least once. The plugin guards duplicates within a running plugin;
   after an executor crash, a duplicate visible event remains possible and is preferable to loss.
-- PR content is untrusted data. The relay forwards routing metadata, not comment bodies or titles.
+- PR content is untrusted data. The relay and plugin independently allowlist bounded trigger
+  metadata; they do not forward comment bodies, titles, check output, commit messages, or patches.
 
 ## Development
 

@@ -79,6 +79,13 @@ describe("relay", () => {
       repository: { id: 42, full_name: "lox/project" },
       pull_request: { number: 17, html_url: "https://github.com/lox/project/pull/17" },
       sender: { login: "reviewer" },
+      review: {
+        id: 91,
+        html_url: "https://github.com/lox/project/pull/17#pullrequestreview-91",
+        state: "approved",
+        user: { login: "reviewer" },
+        body: "UNTRUSTED_SENTINEL",
+      },
     })
     const request = async () => app.fetch(new Request("https://relay.test/github/webhook", {
       method: "POST",
@@ -94,6 +101,18 @@ describe("relay", () => {
     expect((await request()).status).toBe(202)
     expect(forwarded).toHaveLength(1)
     expect(forwarded[0]?.idempotencyKey).toBe("delivery-1:reviews:42:17")
+    expect(JSON.parse(forwarded[0]!.body)).toMatchObject({
+      schemaVersion: 1,
+      behavior: "investigate",
+      detail: {
+        kind: "pull_request_review",
+        id: 91,
+        url: "https://github.com/lox/project/pull/17#pullrequestreview-91",
+        state: "approved",
+        author: "reviewer",
+      },
+    })
+    expect(forwarded[0]?.body).not.toContain("UNTRUSTED_SENTINEL")
   })
 
   test("rejects an invalid GitHub signature", async () => {
