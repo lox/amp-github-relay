@@ -1,36 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly BUN_VERSION="1.3.10"
-readonly BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
 
 started_at=$SECONDS
-echo "[setup] Ensuring Bun ${BUN_VERSION}"
+echo "[setup] Ensuring pinned tools"
 
-bun_bin=""
-if [[ -x "$BUN_INSTALL/bin/bun" ]] && [[ "$($BUN_INSTALL/bin/bun --version)" == "$BUN_VERSION" ]]; then
-  bun_bin="$BUN_INSTALL/bin/bun"
-elif command -v bun >/dev/null 2>&1 && [[ "$(bun --version)" == "$BUN_VERSION" ]]; then
-  bun_bin="$(command -v bun)"
+if command -v mise >/dev/null 2>&1; then
+  mise_bin="$(command -v mise)"
 else
-  curl -fsSL https://bun.sh/install | bash -s -- "bun-v${BUN_VERSION}"
-  bun_bin="$BUN_INSTALL/bin/bun"
+  curl -fsSL https://mise.run | MISE_VERSION=v2026.8.10 sh
+  mise_bin="${HOME}/.local/bin/mise"
 fi
 
-if [[ "$bun_bin" == "$BUN_INSTALL/bin/bun" ]]; then
-  profile_marker="# amp-github-relay Bun"
-  if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
-    cat >> "$HOME/.bash_profile" <<EOF
-
-$profile_marker
-export BUN_INSTALL="$BUN_INSTALL"
-export PATH="\$BUN_INSTALL/bin:\$PATH"
-EOF
-  fi
-fi
-
-echo "[setup] Installing locked dependencies"
-"$bun_bin" install --frozen-lockfile
+"$mise_bin" install
+"$mise_bin" exec -- bun install --frozen-lockfile
 
 [[ -f .env ]] || cp -- .env.example .env
 mkdir -p data

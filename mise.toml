@@ -1,0 +1,23 @@
+[tools]
+bun = "1.3.10"
+flyctl = "0.4.87"
+
+[tasks.test]
+description = "Run the Bun test suite"
+run = "bun test"
+
+[tasks.typecheck]
+description = "Typecheck the TypeScript code"
+run = "bun run typecheck"
+
+[tasks.ci]
+description = "Install dependencies and run the same checks as CI"
+run = '''
+bun install --frozen-lockfile
+bun test
+bun run typecheck
+'''
+
+[tasks.deploy]
+description = "Deploy the app to Fly.io"
+run = "flyctl deploy --remote-only"
