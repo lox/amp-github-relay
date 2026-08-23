@@ -105,3 +105,11 @@ bun install
 bun test
 bun run typecheck
 ```
+
+## End-to-end smoke test
+
+1. Create a PR from an orb thread with `gh pr create`; the plugin should automatically subscribe
+   that thread with `investigate` behavior.
+2. List the thread's subscriptions and confirm the new PR appears.
+3. Add a comment or review on GitHub and let the orb become idle.
+4. Confirm the GitHub event wakes the orb and appears as a visible thread message.
