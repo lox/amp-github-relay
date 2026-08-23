@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The local SQLite database creates its own file, but its parent must exist.
+mkdir -p data
+
+echo "[resume] Orb workspace ready"

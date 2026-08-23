@@ -4,3 +4,4 @@ data/
 *.sqlite-shm
 *.sqlite-wal
 .env
+.amp/portals/*
