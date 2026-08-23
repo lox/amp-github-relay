@@ -54,15 +54,6 @@ function repositoryName(value: unknown): string | null {
     && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value) ? value : null
 }
 
-function timestamp(value: unknown): string | undefined {
-  if (typeof value !== "string" || value.length > 64
-    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
-    return undefined
-  }
-  const parsed = new Date(value)
-  return Number.isNaN(parsed.valueOf()) ? undefined : parsed.toISOString()
-}
-
 function githubUrl(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length > 2_048 || /[\u0000-\u001f\u007f]/.test(value)) return undefined
   try {
@@ -152,11 +143,9 @@ function detailFor(eventName: string, payload: JsonObject, fullName: string): Ro
       const state = lowerEnumValue(review.state, ["approved", "changes_requested", "commented", "dismissed", "pending"] as const)
       const author = principal(object(review.user)?.login)
       const commitSha = sha(review.commit_id)
-      const submittedAt = timestamp(review.submitted_at)
       if (state) value.state = state
       if (author) value.author = author
       if (commitSha) value.commitSha = commitSha
-      if (submittedAt) value.submittedAt = submittedAt
       detail = value
     }
   } else if (eventName === "pull_request_review_comment") {
@@ -169,21 +158,15 @@ function detailFor(eventName: string, payload: JsonObject, fullName: string): Ro
         url: `https://github.com/${fullName}/pull/${pullRequestNumber}#discussion_r${id}`,
       }
       const author = principal(object(comment.user)?.login)
-      const createdAt = timestamp(comment.created_at)
-      const updatedAt = timestamp(comment.updated_at)
       const inReplyToId = positiveNumber(comment.in_reply_to_id)
       const line = positiveNumber(comment.line)
       const startLine = positiveNumber(comment.start_line)
       const side = enumValue(comment.side, ["LEFT", "RIGHT"] as const)
-      const startSide = enumValue(comment.start_side, ["LEFT", "RIGHT"] as const)
       if (author) value.author = author
-      if (createdAt) value.createdAt = createdAt
-      if (updatedAt) value.updatedAt = updatedAt
       if (inReplyToId) value.inReplyToId = inReplyToId
       if (line) value.line = line
       if (startLine) value.startLine = startLine
       if (side) value.side = side
-      if (startSide) value.startSide = startSide
       detail = value
     }
   } else if (eventName === "issue_comment") {
@@ -196,11 +179,7 @@ function detailFor(eventName: string, payload: JsonObject, fullName: string): Ro
         url: `https://github.com/${fullName}/pull/${pullRequestNumber}#issuecomment-${id}`,
       }
       const author = principal(object(comment.user)?.login)
-      const createdAt = timestamp(comment.created_at)
-      const updatedAt = timestamp(comment.updated_at)
       if (author) value.author = author
-      if (createdAt) value.createdAt = createdAt
-      if (updatedAt) value.updatedAt = updatedAt
       detail = value
     }
   } else if (eventName === "check_run") {
@@ -213,15 +192,11 @@ function detailFor(eventName: string, payload: JsonObject, fullName: string): Ro
       const conclusion = checkConclusion(checkRun.conclusion)
       const headSha = sha(checkRun.head_sha)
       const appSlug = principal(object(checkRun.app)?.slug)
-      const startedAt = timestamp(checkRun.started_at)
-      const completedAt = timestamp(checkRun.completed_at)
       if (url) value.url = url
       if (status) value.status = status
       if (conclusion !== undefined) value.conclusion = conclusion
       if (headSha) value.headSha = headSha
       if (appSlug) value.appSlug = appSlug
-      if (startedAt) value.startedAt = startedAt
-      if (completedAt) value.completedAt = completedAt
       detail = value
     }
   } else if (eventName === "check_suite") {
@@ -249,28 +224,18 @@ function detailFor(eventName: string, payload: JsonObject, fullName: string): Ro
     const id = positiveNumber(workflowRun?.id)
     if (workflowRun && id) {
       const value: Extract<RoutedEventDetail, { kind: "workflow_run" }> = { kind: "workflow_run", id }
-      const workflowId = positiveNumber(workflowRun.workflow_id)
       const url = githubUrl(workflowRun.html_url)
       const status = checkStatus(workflowRun.status)
       const conclusion = checkConclusion(workflowRun.conclusion)
       const event = triggerName(workflowRun.event)
-      const runNumber = positiveNumber(workflowRun.run_number)
       const runAttempt = positiveNumber(workflowRun.run_attempt)
       const headSha = sha(workflowRun.head_sha)
-      const createdAt = timestamp(workflowRun.created_at)
-      const runStartedAt = timestamp(workflowRun.run_started_at)
-      const updatedAt = timestamp(workflowRun.updated_at)
-      if (workflowId) value.workflowId = workflowId
       if (url) value.url = url
       if (status) value.status = status
       if (conclusion !== undefined) value.conclusion = conclusion
       if (event) value.triggerEvent = event
-      if (runNumber) value.runNumber = runNumber
       if (runAttempt) value.runAttempt = runAttempt
       if (headSha) value.headSha = headSha
-      if (createdAt) value.createdAt = createdAt
-      if (runStartedAt) value.runStartedAt = runStartedAt
-      if (updatedAt) value.updatedAt = updatedAt
       detail = value
     }
   }

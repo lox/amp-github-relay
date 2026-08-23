@@ -80,10 +80,20 @@ Only notify me about reviews and CI.
 ```
 
 The agent calls `github_pr_subscribe`. Events are added as visible user messages with fixed
-instructions based on the subscription behavior. Trigger messages include allowlisted metadata
-that is already present in the webhook, such as check conclusions, workflow attempts, review
-states, comment and review URLs, line numbers, and commit SHAs. This lets an awakened agent decide
-what to inspect without first fetching basic event identity.
+instructions based on the subscription behavior. Trigger messages render a concise summary from
+allowlisted metadata already present in the webhook, such as check conclusions, workflow attempts,
+review states, comment and review URLs, line numbers, and commit SHAs. For example:
+
+```text
+Validated GitHub summary (untrusted context):
+[GitHub event 8ceeb9e0] Check run completed on owner/repo#123 by @octocat.
+Check run 456: failure via github-actions.
+Commit: 0123456789ab.
+Details: https://github.com/owner/repo/runs/456
+PR: https://github.com/owner/repo/pull/123
+```
+
+This lets an awakened agent decide what to inspect without first fetching basic event identity.
 
 PR-controlled prose is not forwarded: titles, bodies, comment text, review text, check names and
 output, commit messages, patches, and filenames are excluded. The agent follows the supplied

@@ -47,28 +47,22 @@ export type RoutedEventDetail =
       state?: "approved" | "changes_requested" | "commented" | "dismissed" | "pending"
       author?: string
       commitSha?: string
-      submittedAt?: string
     }
   | {
       kind: "pull_request_review_comment"
       id: number
       url: string
       author?: string
-      createdAt?: string
-      updatedAt?: string
       inReplyToId?: number
       line?: number
       startLine?: number
       side?: "LEFT" | "RIGHT"
-      startSide?: "LEFT" | "RIGHT"
     }
   | {
       kind: "issue_comment"
       id: number
       url: string
       author?: string
-      createdAt?: string
-      updatedAt?: string
     }
   | {
       kind: "check_run"
@@ -78,8 +72,6 @@ export type RoutedEventDetail =
       conclusion?: CheckConclusion | null
       headSha?: string
       appSlug?: string
-      startedAt?: string
-      completedAt?: string
     }
   | {
       kind: "check_suite"
@@ -93,17 +85,12 @@ export type RoutedEventDetail =
   | {
       kind: "workflow_run"
       id: number
-      workflowId?: number
       url?: string
       status?: CheckStatus
       conclusion?: CheckConclusion | null
       triggerEvent?: string
-      runNumber?: number
       runAttempt?: number
       headSha?: string
-      createdAt?: string
-      runStartedAt?: string
-      updatedAt?: string
     }
 
 export interface Subscription {

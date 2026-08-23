@@ -52,7 +52,6 @@ describe("normalizeGitHubEvent", () => {
         state: "APPROVED",
         user: { login: "review-author" },
         commit_id: headSha,
-        submitted_at: "2026-08-23T10:20:30Z",
       },
     })[0]
     expect(event?.detail).toEqual({
@@ -62,7 +61,6 @@ describe("normalizeGitHubEvent", () => {
       state: "approved",
       author: "review-author",
       commitSha: headSha,
-      submittedAt: "2026-08-23T10:20:30.000Z",
     })
   })
 
@@ -75,13 +73,10 @@ describe("normalizeGitHubEvent", () => {
         id: 92,
         html_url: "https://github.com/lox/project/pull/17#discussion_r92",
         user: { login: "commenter" },
-        created_at: "2026-08-23T10:20:30Z",
-        updated_at: "2026-08-23T10:21:30Z",
         in_reply_to_id: 90,
         line: 27,
         start_line: 24,
         side: "RIGHT",
-        start_side: "RIGHT",
       },
     })[0]
     expect(event?.detail).toEqual({
@@ -89,13 +84,10 @@ describe("normalizeGitHubEvent", () => {
       id: 92,
       url: "https://github.com/lox/project/pull/17#discussion_r92",
       author: "commenter",
-      createdAt: "2026-08-23T10:20:30.000Z",
-      updatedAt: "2026-08-23T10:21:30.000Z",
       inReplyToId: 90,
       line: 27,
       startLine: 24,
       side: "RIGHT",
-      startSide: "RIGHT",
     })
   })
 
@@ -108,8 +100,6 @@ describe("normalizeGitHubEvent", () => {
         id: 93,
         html_url: "https://github.com/lox/project/pull/17#issuecomment-93",
         user: { login: "dependabot[bot]" },
-        created_at: "2026-08-23T10:20:30Z",
-        updated_at: "2026-08-23T10:21:30Z",
       },
     })[0]
     expect(event?.detail).toEqual({
@@ -117,8 +107,6 @@ describe("normalizeGitHubEvent", () => {
       id: 93,
       url: "https://github.com/lox/project/pull/17#issuecomment-93",
       author: "dependabot[bot]",
-      createdAt: "2026-08-23T10:20:30.000Z",
-      updatedAt: "2026-08-23T10:21:30.000Z",
     })
   })
 
@@ -133,8 +121,6 @@ describe("normalizeGitHubEvent", () => {
         conclusion: null,
         head_sha: headSha,
         app: { slug: "github-actions" },
-        started_at: "2026-08-23T10:20:30Z",
-        completed_at: "2026-08-23T10:21:30Z",
         pull_requests: [pullRequest, { number: 18 }],
       },
     })
@@ -148,8 +134,6 @@ describe("normalizeGitHubEvent", () => {
       conclusion: null,
       headSha,
       appSlug: "github-actions",
-      startedAt: "2026-08-23T10:20:30.000Z",
-      completedAt: "2026-08-23T10:21:30.000Z",
     })
     expect(events[1]?.detail).toEqual(events[0]?.detail)
   })
@@ -184,34 +168,24 @@ describe("normalizeGitHubEvent", () => {
       repository,
       workflow_run: {
         id: 96,
-        workflow_id: 97,
         html_url: "https://github.com/lox/project/actions/runs/96",
         status: "completed",
         conclusion: "timed_out",
         event: "pull_request",
-        run_number: 12,
         run_attempt: 2,
         head_sha: headSha,
-        created_at: "2026-08-23T10:20:30Z",
-        run_started_at: "2026-08-23T10:20:40Z",
-        updated_at: "2026-08-23T10:21:30Z",
         pull_requests: [pullRequest],
       },
     })[0]
     expect(event?.detail).toEqual({
       kind: "workflow_run",
       id: 96,
-      workflowId: 97,
       url: "https://github.com/lox/project/actions/runs/96",
       status: "completed",
       conclusion: "timed_out",
       triggerEvent: "pull_request",
-      runNumber: 12,
       runAttempt: 2,
       headSha,
-      createdAt: "2026-08-23T10:20:30.000Z",
-      runStartedAt: "2026-08-23T10:20:40.000Z",
-      updatedAt: "2026-08-23T10:21:30.000Z",
     })
   })
 
