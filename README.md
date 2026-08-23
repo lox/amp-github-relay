@@ -24,16 +24,34 @@ The SQLite database must live on persistent storage in production. `GET /healthz
 check. The service deliberately permits delivery only to configured HTTPS host suffixes to avoid
 turning the subscription API into an SSRF endpoint.
 
+## Deploy to Fly.io
+
+`fly.toml` runs one always-on shared-CPU machine in Sydney with a persistent 1 GB volume. Before
+the first deploy, set the GitHub webhook secret and at least one Amp identity allowlist:
+
+```sh
+fly secrets set GITHUB_WEBHOOK_SECRET=... AMP_ALLOWED_WORKSPACE_IDS=...
+# For a personal Amp account without a workspace, use AMP_ALLOWED_USER_IDS instead.
+fly deploy
+```
+
+The GitHub App webhook URL is `https://amp-pr-relay.fly.dev/github/webhook`.
+
 ## Install the orb plugin
 
 Copy `plugin/github-relay.ts` into `.amp/plugins/github-relay.ts` in a project, or into the user's
-global Amp plugin directory. Configure these as orb secrets:
+global Amp plugin directory. The published relay URL and OIDC audience are defaults; override them
+only for another deployment:
 
 ```text
 AMP_GITHUB_RELAY_URL=https://<relay-host>
-AMP_GITHUB_RELAY_TOKEN=<same value as RELAY_API_TOKEN>
-AMP_GITHUB_RELAY_SIGNING_SECRET=<same value as RELAY_SIGNING_SECRET>
+# Optional; this is the default:
+AMP_GITHUB_RELAY_AUDIENCE=urn:lox:amp-github-relay
 ```
+
+The plugin mints a ten-minute Amp workload identity token for each subscription API request. No
+long-lived relay credential is stored in the orb. A successful `gh pr create` performed by the
+thread is detected and automatically subscribed with `investigate` behavior.
 
 Reload the plugin. A user can then say:
 
@@ -55,7 +73,9 @@ trigger message; the awakened agent fetches current PR state using its normal Gi
 ## Security and delivery
 
 - GitHub requests are verified using `X-Hub-Signature-256` over exact request bytes.
-- Relay-to-orb requests are separately HMAC signed over exact request bytes.
+- Subscription requests use Amp's RS256-signed OIDC workload identity. The relay derives the
+  owning thread from the verified `thread_id` claim and enforces configured workspace, project,
+  or user allowlists.
 - Capability webhook URLs are never returned by list or create API responses.
 - GitHub delivery IDs become Amp idempotency keys and successful forwards are deduplicated.
 - A 404 or 410 from an Amp webhook removes that dead subscription without blocking other threads.

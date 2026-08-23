@@ -5,9 +5,11 @@ import { hmacSha256 } from "../src/crypto"
 const config = {
   databasePath: ":memory:",
   githubWebhookSecret: "github-secret",
-  apiToken: "api-token",
-  relaySigningSecret: "relay-secret",
   allowedWebhookHosts: ["example.test"],
+  authenticate: async (request: Request) => {
+    if (request.headers.get("authorization") !== "Bearer oidc-token") throw new Error("unauthorized")
+    return { threadId: "T-test", workspaceId: "W-test", projectId: "P-test", userId: "U-test" }
+  },
 }
 
 const openRelays: ReturnType<typeof createRelay>[] = []
@@ -26,7 +28,7 @@ function relay() {
 function apiRequest(body: unknown, method = "POST") {
   return new Request("https://relay.test/api/subscriptions", {
     method,
-    headers: { authorization: "Bearer api-token", "content-type": "application/json" },
+    headers: { authorization: "Bearer oidc-token", "content-type": "application/json" },
     body: method === "GET" ? undefined : JSON.stringify(body),
   })
 }
@@ -40,7 +42,7 @@ describe("relay", () => {
   test("registers without exposing the capability URL", async () => {
     const app = relay()
     const response = await app.fetch(apiRequest({
-      threadId: "T-test",
+      threadId: "T-attacker-controlled",
       repository: "lox/project",
       pullRequestNumber: 17,
       webhookUrl: "https://hooks.example.test/secret-capability",
@@ -49,9 +51,11 @@ describe("relay", () => {
     }))
     expect(response.status).toBe(201)
     expect(await response.text()).not.toContain("secret-capability")
+    expect(app.database.list("T-test")).toHaveLength(1)
+    expect(app.database.list("T-attacker-controlled")).toHaveLength(0)
   })
 
-  test("verifies, routes, signs, and deduplicates a GitHub delivery", async () => {
+  test("verifies, routes, and deduplicates a GitHub delivery", async () => {
     const app = relay()
     await app.fetch(apiRequest({
       threadId: "T-test",
@@ -61,12 +65,11 @@ describe("relay", () => {
       events: ["reviews"],
       behavior: "investigate",
     }))
-    const forwarded: Array<{ body: string; signature: string | null; idempotencyKey: string | null }> = []
+    const forwarded: Array<{ body: string; idempotencyKey: string | null }> = []
     const fetchSpy = spyOn(globalThis, "fetch")
     fetchSpy.mockImplementation((async (_input, init) => {
       forwarded.push({
         body: String(init?.body),
-        signature: new Headers(init?.headers).get("x-amp-relay-signature-256"),
         idempotencyKey: new Headers(init?.headers).get("idempotency-key"),
       })
       return new Response(null, { status: 202 })
@@ -91,7 +94,6 @@ describe("relay", () => {
     expect((await request()).status).toBe(202)
     expect(forwarded).toHaveLength(1)
     expect(forwarded[0]?.idempotencyKey).toBe("delivery-1:reviews:42:17")
-    expect(forwarded[0]?.signature).toBe(await hmacSha256("relay-secret", forwarded[0]!.body))
   })
 
   test("rejects an invalid GitHub signature", async () => {

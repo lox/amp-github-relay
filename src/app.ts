@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
-import { hmacSha256, timingSafeEqual, verifyHmac } from "./crypto"
+import type { OrbIdentity } from "./auth"
+import { verifyHmac } from "./crypto"
 import { RelayDatabase } from "./database"
 import { normalizeGitHubEvent } from "./events"
 import {
@@ -12,18 +13,12 @@ import {
 export interface RelayConfig {
   databasePath: string
   githubWebhookSecret: string
-  apiToken: string
-  relaySigningSecret: string
   allowedWebhookHosts: string[]
+  authenticate: (request: Request) => Promise<OrbIdentity>
 }
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status })
-}
-
-function authorized(request: Request, token: string): boolean {
-  const value = request.headers.get("authorization")
-  return value?.startsWith("Bearer ") === true && timingSafeEqual(value.slice(7), token)
 }
 
 function isAllowedWebhookUrl(value: string, allowedHosts: string[]): boolean {
@@ -52,19 +47,17 @@ export function createRelay(config: RelayConfig) {
   const database = new RelayDatabase(config.databasePath)
 
   async function subscriptions(request: Request): Promise<Response> {
-    if (!authorized(request, config.apiToken)) return json({ error: "unauthorized" }, 401)
+    const identity = await config.authenticate(request).catch(() => null)
+    if (!identity) return json({ error: "unauthorized" }, 401)
 
     if (request.method === "GET") {
-      const threadId = new URL(request.url).searchParams.get("threadId")
-      if (!threadId) return json({ error: "threadId is required" }, 400)
-      return json({ subscriptions: database.list(threadId).map(({ webhookUrl: _, ...item }) => item) })
+      return json({ subscriptions: database.list(identity.threadId).map(({ webhookUrl: _, ...item }) => item) })
     }
 
     if (request.method === "POST") {
       const input = await request.json().catch(() => null) as Record<string, unknown> | null
       const repository = typeof input?.repository === "string" ? input.repository.toLowerCase() : ""
       const pullRequestNumber = input?.pullRequestNumber
-      const threadId = input?.threadId
       const webhookUrl = input?.webhookUrl
       const events = input?.events
       const behavior = input?.behavior
@@ -72,14 +65,13 @@ export function createRelay(config: RelayConfig) {
       if (!Number.isInteger(pullRequestNumber) || (pullRequestNumber as number) < 1) {
         return json({ error: "invalid pullRequestNumber" }, 400)
       }
-      if (typeof threadId !== "string" || !threadId.startsWith("T-")) return json({ error: "invalid threadId" }, 400)
       if (typeof webhookUrl !== "string" || !isAllowedWebhookUrl(webhookUrl, config.allowedWebhookHosts)) {
         return json({ error: "webhookUrl host is not allowed" }, 400)
       }
       if (!validEvents(events)) return json({ error: "invalid events" }, 400)
       if (!validBehavior(behavior)) return json({ error: "invalid behavior" }, 400)
       const subscription = database.upsert({
-        threadId,
+        threadId: identity.threadId,
         repository,
         pullRequestNumber: pullRequestNumber as number,
         webhookUrl,
@@ -92,10 +84,10 @@ export function createRelay(config: RelayConfig) {
 
     if (request.method === "DELETE") {
       const input = await request.json().catch(() => null) as Record<string, unknown> | null
-      if (typeof input?.threadId !== "string" || typeof input.id !== "string") {
-        return json({ error: "threadId and id are required" }, 400)
+      if (typeof input?.id !== "string") {
+        return json({ error: "id is required" }, 400)
       }
-      return database.delete(input.threadId, input.id)
+      return database.delete(identity.threadId, input.id)
         ? new Response(null, { status: 204 })
         : json({ error: "subscription not found" }, 404)
     }
@@ -130,7 +122,6 @@ export function createRelay(config: RelayConfig) {
       )) {
         if (database.wasDelivered(subscription.id, deliveryId, event.event)) continue
         const forwardedBody = JSON.stringify({ ...event, behavior: subscription.behavior })
-        const relaySignature = await hmacSha256(config.relaySigningSecret, forwardedBody)
         let response: Response
         try {
           response = await fetch(subscription.webhookUrl, {
@@ -138,7 +129,6 @@ export function createRelay(config: RelayConfig) {
             headers: {
               "content-type": "application/json",
               "idempotency-key": `${deliveryId}:${event.event}:${event.repository.id}:${event.pullRequest.number}`,
-              "x-amp-relay-signature-256": relaySignature,
             },
             body: forwardedBody,
             signal: AbortSignal.timeout(10_000),

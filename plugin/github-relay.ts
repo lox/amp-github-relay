@@ -1,4 +1,4 @@
-import type { PluginAPI } from "@ampcode/plugin"
+import type { PluginAPI, ToolResultEvent } from "@ampcode/plugin"
 
 export const description = "Subscribes an orb thread to GitHub pull request events through amp-github-relay."
 
@@ -12,30 +12,6 @@ const defaultEvents = [
   "merged",
   "closed",
 ]
-
-function required(name: string): string {
-  const value = process.env[name]
-  if (!value) throw new Error(`${name} is not configured for this orb`)
-  return value.replace(/\/$/, "")
-}
-
-async function signature(secret: string, body: Uint8Array): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  )
-  const result = await crypto.subtle.sign("HMAC", key, Uint8Array.from(body))
-  return `sha256=${Buffer.from(result).toString("hex")}`
-}
-
-function equal(left: string, right: string): boolean {
-  const a = Buffer.from(left)
-  const b = Buffer.from(right)
-  return a.length === b.length && crypto.timingSafeEqual(a, b)
-}
 
 function parsePullRequest(value: string, repository: string | null): { repository: string; number: number } {
   const url = value.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/.*)?$/)
@@ -53,11 +29,17 @@ function repositoryFromRemote(remote: string): string | null {
   return match?.[1]?.toLowerCase() ?? null
 }
 
-async function relayRequest(path: string, init: RequestInit = {}): Promise<Response> {
-  const response = await fetch(`${required("AMP_GITHUB_RELAY_URL")}${path}`, {
+async function relayRequest(amp: PluginAPI, path: string, init: RequestInit = {}): Promise<Response> {
+  const relayUrl = (process.env.AMP_GITHUB_RELAY_URL ?? "https://amp-pr-relay.fly.dev").replace(/\/$/, "")
+  const audience = process.env.AMP_GITHUB_RELAY_AUDIENCE ?? "urn:lox:amp-github-relay"
+  const token = await amp.$`amp orb id-token --audience ${audience} --ttl-seconds 600`
+  if (token.exitCode !== 0 || !token.stdout.trim()) {
+    throw new Error(`Could not mint Amp workload identity: ${token.stderr.trim()}`)
+  }
+  const response = await fetch(`${relayUrl}${path}`, {
     ...init,
     headers: {
-      authorization: `Bearer ${required("AMP_GITHUB_RELAY_TOKEN")}`,
+      authorization: `Bearer ${token.stdout.trim()}`,
       "content-type": "application/json",
       ...init.headers,
     },
@@ -68,6 +50,35 @@ async function relayRequest(path: string, init: RequestInit = {}): Promise<Respo
     throw new Error(`GitHub relay returned ${response.status}: ${detail}`)
   }
   return response
+}
+
+async function subscribe(
+  amp: PluginAPI,
+  webhookUrl: string,
+  target: { repository: string; number: number },
+  events: unknown[],
+  behavior: string,
+): Promise<{ id: string }> {
+  const response = await relayRequest(amp, "/api/subscriptions", {
+    method: "POST",
+    body: JSON.stringify({
+      repository: target.repository,
+      pullRequestNumber: target.number,
+      webhookUrl,
+      events,
+      behavior,
+    }),
+  })
+  const result = await response.json() as { subscription: { id: string } }
+  return result.subscription
+}
+
+function createsPullRequest(amp: PluginAPI, event: ToolResultEvent): boolean {
+  if (event.status !== "done") return false
+  const command = amp.helpers.shellCommandFromToolCall(event)?.command ?? ""
+  if (/(?:^|[;&|]\s*)gh\s+pr\s+create(?:\s|$)/.test(command)) return true
+  const tool = event.tool.toLowerCase()
+  return tool.includes("create") && (tool.includes("pull_request") || tool.includes("pull-request"))
 }
 
 function eventPrompt(payload: Record<string, unknown>): string {
@@ -90,16 +101,11 @@ function eventPrompt(payload: Record<string, unknown>): string {
 }
 
 export default async function githubRelay(amp: PluginAPI) {
-  const signingSecret = required("AMP_GITHUB_RELAY_SIGNING_SECRET")
   const seen = new Set<string>()
+  const pendingAutomaticSubscriptions = new Set<string>()
   const { url: webhookUrl } = await amp.createWebhook({
     key: "github-pr-events",
-    headers: ["x-amp-relay-signature-256"],
     handler: async (event, ctx) => {
-      const supplied = event.headers["x-amp-relay-signature-256"] ?? ""
-      if (!equal(await signature(signingSecret, event.body), supplied)) {
-        throw new Error("Rejected GitHub relay event with invalid signature")
-      }
       if (seen.has(event.id)) return
       const payload = JSON.parse(new TextDecoder().decode(event.body)) as Record<string, unknown>
       if (payload.schemaVersion !== 1 || typeof payload.deliveryId !== "string") {
@@ -111,6 +117,28 @@ export default async function githubRelay(amp: PluginAPI) {
       )
       seen.add(event.id)
     },
+  })
+
+  amp.on("tool.result", (event) => {
+    if (createsPullRequest(amp, event)) pendingAutomaticSubscriptions.add(event.thread.id)
+  })
+
+  amp.on("agent.end", async (event, ctx) => {
+    if (!pendingAutomaticSubscriptions.delete(event.thread.id)) return
+    const result = await amp.$`gh pr view --json url`
+    if (result.exitCode !== 0) {
+      ctx.logger.log("Could not resolve the newly created pull request for automatic subscription")
+      return
+    }
+    try {
+      const url = (JSON.parse(result.stdout) as { url?: unknown }).url
+      if (typeof url !== "string") throw new Error("gh pr view did not return a URL")
+      const target = parsePullRequest(url, null)
+      await subscribe(amp, webhookUrl, target, defaultEvents, "investigate")
+      await ctx.ui.notify(`Subscribed this thread to ${target.repository}#${target.number}.`).catch(() => undefined)
+    } catch (error) {
+      ctx.logger.log("Automatic pull request subscription failed", error)
+    }
   })
 
   amp.registerTool({
@@ -137,19 +165,8 @@ export default async function githubRelay(amp: PluginAPI) {
       const target = parsePullRequest(pullRequest, repository)
       const events = Array.isArray(input.events) ? input.events : defaultEvents
       const behavior = typeof input.behavior === "string" ? input.behavior : "investigate"
-      const response = await relayRequest("/api/subscriptions", {
-        method: "POST",
-        body: JSON.stringify({
-          threadId: ctx.thread.id,
-          repository: target.repository,
-          pullRequestNumber: target.number,
-          webhookUrl,
-          events,
-          behavior,
-        }),
-      })
-      const result = await response.json() as { subscription: { id: string } }
-      return `Subscribed this thread to ${target.repository}#${target.number} (${behavior}; ${events.join(", ")}). Subscription ID: ${result.subscription.id}`
+      const subscription = await subscribe(amp, webhookUrl, target, events, behavior)
+      return `Subscribed this thread to ${target.repository}#${target.number} (${behavior}; ${events.join(", ")}). Subscription ID: ${subscription.id}`
     },
   })
 
@@ -159,7 +176,7 @@ export default async function githubRelay(amp: PluginAPI) {
     description: "List GitHub pull requests watched by the current thread.",
     inputSchema: { type: "object", properties: {} },
     async execute(_input, ctx) {
-      const response = await relayRequest(`/api/subscriptions?threadId=${encodeURIComponent(ctx.thread.id)}`)
+      const response = await relayRequest(amp, "/api/subscriptions")
       return JSON.stringify(await response.json(), null, 2)
     },
   })
@@ -175,9 +192,9 @@ export default async function githubRelay(amp: PluginAPI) {
     },
     async execute(input, ctx) {
       if (typeof input.id !== "string") throw new Error("Subscription ID is required")
-      await relayRequest("/api/subscriptions", {
+      await relayRequest(amp, "/api/subscriptions", {
         method: "DELETE",
-        body: JSON.stringify({ threadId: ctx.thread.id, id: input.id }),
+        body: JSON.stringify({ id: input.id }),
       })
       return `Unsubscribed ${input.id}.`
     },

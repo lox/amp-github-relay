@@ -29,3 +29,7 @@ The MVP only receives webhooks, so request read-only access to:
 
 Install the app on the repositories whose events should be routed. The relay does not need the
 App private key until it starts calling GitHub's API itself.
+
+Orb subscription requests are separate from GitHub authentication. They use short-lived Amp OIDC
+tokens with audience `urn:lox:amp-github-relay`; the relay must restrict at least one immutable
+Amp workspace, project, or user ID.

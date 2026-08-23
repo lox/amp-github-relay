@@ -13,5 +13,8 @@
     "@ampcode/plugin": "latest",
     "@types/bun": "latest",
     "typescript": "latest"
+  },
+  "dependencies": {
+    "jose": "^6.2.10"
   }
 }
