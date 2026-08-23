@@ -50,7 +50,9 @@ fly secrets set GITHUB_WEBHOOK_SECRET=... AMP_ALLOWED_WORKSPACE_IDS=...
 fly deploy
 ```
 
-The GitHub App webhook URL is `https://amp-pr-relay.fly.dev/github/webhook`.
+The GitHub App webhook URL is `https://amp-pr-relay.fly.dev/github/webhook`. Install the app on
+every repository whose pull request events should reach subscribed orb threads; creating the app
+alone does not install it.
 
 ## Install the orb plugin
 
