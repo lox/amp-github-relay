@@ -26,13 +26,19 @@ signed `thread_id` claim. A caller cannot select another thread through the requ
 
 ## Run the relay locally
 
+Install [mise](https://mise.jdx.dev/) and let it install the pinned Bun and Fly.io CLI versions:
+
+```sh
+mise install
+```
+
 ```sh
 cp .env.example .env
 # Set GITHUB_WEBHOOK_SECRET and at least one AMP_ALLOWED_* allowlist.
 # Set AMP_WEBHOOK_ALLOWED_HOSTS to the hostname or parent domain used by
 # capability URLs returned by amp.createWebhook.
-bun install
-bun run start
+mise exec -- bun install
+mise exec -- bun run start
 ```
 
 The SQLite database must live on persistent storage in production. `GET /healthz` is the health
@@ -45,10 +51,16 @@ turning the subscription API into an SSRF endpoint.
 the first deploy, set the GitHub webhook secret and at least one Amp identity allowlist:
 
 ```sh
-fly secrets set GITHUB_WEBHOOK_SECRET=... AMP_ALLOWED_WORKSPACE_IDS=...
+mise exec -- flyctl secrets set GITHUB_WEBHOOK_SECRET=... AMP_ALLOWED_WORKSPACE_IDS=...
 # For a personal Amp account without a workspace, use AMP_ALLOWED_USER_IDS instead.
-fly deploy
+mise run deploy
 ```
+
+Every pull request and push to `main` runs `mise run ci` in GitHub Actions. A successful check on
+`main` then deploys to Fly.io. Create an app-scoped deploy token with
+`mise exec -- flyctl tokens create deploy --app amp-pr-relay`, then save the full token as the
+`FLY_API_TOKEN` repository Actions secret. The app, volume, and application secrets must exist
+before the first automated deployment.
 
 The GitHub App webhook URL is `https://amp-pr-relay.fly.dev/github/webhook`. Install the app on
 every repository whose pull request events should reach subscribed orb threads; creating the app
@@ -105,7 +117,5 @@ trigger message; the awakened agent fetches current PR state using its normal Gi
 ## Development
 
 ```sh
-bun install
-bun test
-bun run typecheck
+mise run ci
 ```
