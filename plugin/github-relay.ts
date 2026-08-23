@@ -75,7 +75,8 @@ async function subscribe(
 
 function createsPullRequest(amp: PluginAPI, event: ToolResultEvent): boolean {
   if (event.status !== "done") return false
-  const command = amp.helpers.shellCommandFromToolCall(event)?.command ?? ""
+  const command = amp.helpers.shellCommandFromToolCall(event)?.command
+    ?? (typeof event.input.command === "string" ? event.input.command : "")
   if (/(?:^|[;&|]\s*)gh\s+pr\s+create(?:\s|$)/.test(command)) return true
   const tool = event.tool.toLowerCase()
   return tool.includes("create") && (tool.includes("pull_request") || tool.includes("pull-request"))
