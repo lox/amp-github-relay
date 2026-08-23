@@ -23,6 +23,7 @@ Subscribe to these repository events:
 The relay only receives webhooks, so request read-only access to:
 
 - Metadata
+- Contents
 - Pull requests
 - Issues
 - Checks

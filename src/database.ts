@@ -8,8 +8,9 @@ interface SubscriptionRow {
   id: string
   thread_id: string
   repository: string
-  target_type: "pull_request" | "branch"
-  target: string
+  pull_request_number: number | null
+  target_type: "pull_request" | "branch" | null
+  target: string | null
   webhook_url: string
   events: string
   behavior: SubscriptionBehavior
@@ -26,9 +27,9 @@ function mapSubscription(row: SubscriptionRow): Subscription {
     behavior: row.behavior,
     createdAt: row.created_at,
   }
-  return row.target_type === "pull_request"
-    ? { ...common, targetType: "pull_request", pullRequestNumber: Number(row.target) }
-    : { ...common, targetType: "branch", branch: row.target }
+  return row.target_type === "branch" && row.target
+    ? { ...common, targetType: "branch", branch: row.target }
+    : { ...common, targetType: "pull_request", pullRequestNumber: row.pull_request_number ?? Number(row.target) }
 }
 
 export class RelayDatabase {
@@ -38,21 +39,24 @@ export class RelayDatabase {
     this.sqlite = new Database(path, { create: true })
     this.sqlite.exec("PRAGMA journal_mode = WAL")
     this.sqlite.exec("PRAGMA foreign_keys = ON")
-    const legacy = this.sqlite.query<{ name: string }, []>("PRAGMA table_info(subscriptions)")
-      .all().some((column) => column.name === "pull_request_number")
+    const columns = this.sqlite.query<{ name: string }, []>("PRAGMA table_info(subscriptions)").all()
+    const legacy = columns.some((column) => column.name === "pull_request_number")
+      && !columns.some((column) => column.name === "target_type")
     if (legacy) this.migratePullRequestSubscriptions()
     this.sqlite.exec(`
       CREATE TABLE IF NOT EXISTS subscriptions (
         id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL,
         repository TEXT NOT NULL,
-        target_type TEXT NOT NULL CHECK(target_type IN ('pull_request', 'branch')),
-        target TEXT NOT NULL,
+        pull_request_number INTEGER,
+        target_type TEXT CHECK(target_type IN ('pull_request', 'branch')),
+        target TEXT,
         webhook_url TEXT NOT NULL,
         events TEXT NOT NULL,
         behavior TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        UNIQUE(thread_id, repository, target_type, target)
+        UNIQUE(thread_id, repository, target_type, target),
+        UNIQUE(thread_id, repository, pull_request_number)
       );
       CREATE TABLE IF NOT EXISTS deliveries (
         subscription_id TEXT NOT NULL,
@@ -75,13 +79,15 @@ export class RelayDatabase {
           id TEXT PRIMARY KEY,
           thread_id TEXT NOT NULL,
           repository TEXT NOT NULL,
-          target_type TEXT NOT NULL CHECK(target_type IN ('pull_request', 'branch')),
-          target TEXT NOT NULL,
+          pull_request_number INTEGER,
+          target_type TEXT CHECK(target_type IN ('pull_request', 'branch')),
+          target TEXT,
           webhook_url TEXT NOT NULL,
           events TEXT NOT NULL,
           behavior TEXT NOT NULL,
           created_at TEXT NOT NULL,
-          UNIQUE(thread_id, repository, target_type, target)
+          UNIQUE(thread_id, repository, target_type, target),
+          UNIQUE(thread_id, repository, pull_request_number)
         );
         CREATE TABLE deliveries (
           subscription_id TEXT NOT NULL,
@@ -92,8 +98,9 @@ export class RelayDatabase {
           FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
         );
         INSERT INTO subscriptions
-          (id, thread_id, repository, target_type, target, webhook_url, events, behavior, created_at)
-        SELECT id, thread_id, repository, 'pull_request', CAST(pull_request_number AS TEXT),
+          (id, thread_id, repository, pull_request_number, target_type, target,
+            webhook_url, events, behavior, created_at)
+        SELECT id, thread_id, repository, pull_request_number, 'pull_request', CAST(pull_request_number AS TEXT),
           webhook_url, events, behavior, created_at
         FROM subscriptions_legacy;
         INSERT INTO deliveries SELECT * FROM deliveries_legacy;
@@ -106,10 +113,13 @@ export class RelayDatabase {
 
   upsert(input: SubscriptionInput): Subscription {
     const target = input.targetType === "pull_request" ? String(input.pullRequestNumber) : input.branch
-    const existing = this.sqlite.query<SubscriptionRow, [string, string, string, string]>(`
+    const pullRequestNumber = input.targetType === "pull_request" ? input.pullRequestNumber : null
+    const existing = this.sqlite.query<SubscriptionRow, [string, string, string, string, string, string]>(`
       SELECT * FROM subscriptions
-      WHERE thread_id = ? AND repository = ? AND target_type = ? AND target = ?
-    `).get(input.threadId, input.repository, input.targetType, target)
+      WHERE thread_id = ? AND repository = ?
+        AND ((target_type = ? AND target = ?)
+          OR (? = 'pull_request' AND target_type IS NULL AND pull_request_number = CAST(? AS INTEGER)))
+    `).get(input.threadId, input.repository, input.targetType, target, input.targetType, target)
     const stored = {
       id: existing?.id ?? crypto.randomUUID(),
       createdAt: existing?.created_at ?? new Date().toISOString(),
@@ -117,25 +127,39 @@ export class RelayDatabase {
     const subscription: Subscription = input.targetType === "pull_request"
       ? { ...input, ...stored }
       : { ...input, ...stored }
-    this.sqlite.query(`
-      INSERT INTO subscriptions
-        (id, thread_id, repository, target_type, target, webhook_url, events, behavior, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(thread_id, repository, target_type, target) DO UPDATE SET
-        webhook_url = excluded.webhook_url,
-        events = excluded.events,
-        behavior = excluded.behavior
-    `).run(
-      subscription.id,
-      subscription.threadId,
-      subscription.repository,
-      subscription.targetType,
-      target,
-      subscription.webhookUrl,
-      JSON.stringify(subscription.events),
-      subscription.behavior,
-      subscription.createdAt,
-    )
+    if (existing) {
+      this.sqlite.query(`
+        UPDATE subscriptions SET
+          target_type = ?, target = ?, pull_request_number = ?, webhook_url = ?, events = ?, behavior = ?
+        WHERE id = ?
+      `).run(
+        subscription.targetType,
+        target,
+        pullRequestNumber,
+        subscription.webhookUrl,
+        JSON.stringify(subscription.events),
+        subscription.behavior,
+        subscription.id,
+      )
+    } else {
+      this.sqlite.query(`
+        INSERT INTO subscriptions
+          (id, thread_id, repository, pull_request_number, target_type, target,
+            webhook_url, events, behavior, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        subscription.id,
+        subscription.threadId,
+        subscription.repository,
+        pullRequestNumber,
+        subscription.targetType,
+        target,
+        subscription.webhookUrl,
+        JSON.stringify(subscription.events),
+        subscription.behavior,
+        subscription.createdAt,
+      )
+    }
     return subscription
   }
 
@@ -146,9 +170,11 @@ export class RelayDatabase {
   }
 
   matching(repository: string, targetType: Subscription["targetType"], target: string, event: SubscriptionEvent): Subscription[] {
-    return this.sqlite.query<SubscriptionRow, [string, string, string]>(`
-      SELECT * FROM subscriptions WHERE repository = ? AND target_type = ? AND target = ?
-    `).all(repository.toLowerCase(), targetType, target).map(mapSubscription)
+    return this.sqlite.query<SubscriptionRow, [string, string, string, string, string]>(`
+      SELECT * FROM subscriptions WHERE repository = ?
+        AND ((target_type = ? AND target = ?)
+          OR (? = 'pull_request' AND target_type IS NULL AND pull_request_number = CAST(? AS INTEGER)))
+    `).all(repository.toLowerCase(), targetType, target, targetType, target).map(mapSubscription)
       .filter((subscription) => subscription.events.includes(event))
   }
 

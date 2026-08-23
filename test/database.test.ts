@@ -59,4 +59,59 @@ describe("RelayDatabase", () => {
     expect(database.wasDelivered("sub-1", "delivery-1", "reviews")).toBe(true)
     database.close()
   })
+
+  test("supports rollback writes and adopts them after rolling forward", () => {
+    const directory = mkdtempSync(join(tmpdir(), "amp-github-relay-"))
+    directories.push(directory)
+    const path = join(directory, "relay.sqlite")
+    const database = new RelayDatabase(path)
+    database.upsert({
+      threadId: "T-test",
+      repository: "lox/project",
+      targetType: "branch",
+      branch: "main",
+      webhookUrl: "https://hooks.example.test/branch",
+      events: ["commits"],
+      behavior: "notify",
+    })
+    database.close()
+
+    const rollback = new Database(path)
+    expect(rollback.query<{ pull_request_number: number | null }, []>(`
+      SELECT pull_request_number FROM subscriptions WHERE target_type = 'branch'
+    `).get()?.pull_request_number).toBeNull()
+    rollback.query(`
+      INSERT INTO subscriptions
+        (id, thread_id, repository, pull_request_number, webhook_url, events, behavior, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(thread_id, repository, pull_request_number) DO UPDATE SET
+        webhook_url = excluded.webhook_url, events = excluded.events, behavior = excluded.behavior
+    `).run(
+      "legacy-sub",
+      "T-test",
+      "lox/project",
+      18,
+      "https://hooks.example.test/legacy",
+      '["reviews"]',
+      "investigate",
+      "2026-08-23T00:00:00.000Z",
+    )
+    rollback.close()
+
+    const rolledForward = new RelayDatabase(path)
+    expect(rolledForward.matching("lox/project", "pull_request", "18", "reviews"))
+      .toHaveLength(1)
+    const adopted = rolledForward.upsert({
+      threadId: "T-test",
+      repository: "lox/project",
+      targetType: "pull_request",
+      pullRequestNumber: 18,
+      webhookUrl: "https://hooks.example.test/current",
+      events: ["reviews"],
+      behavior: "investigate",
+    })
+    expect(adopted.id).toBe("legacy-sub")
+    expect(rolledForward.list("T-test")).toContainEqual(adopted)
+    rolledForward.close()
+  })
 })
