@@ -1,4 +1,5 @@
 import type { PluginAPI, ToolResultEvent } from "@ampcode/plugin"
+import { resolve } from "node:path"
 
 export const description = "Subscribes an orb thread to GitHub pull request events through amp-github-relay."
 
@@ -77,6 +78,16 @@ function isPullRequestCommand(command: string): boolean {
   return /(?:^|[;&|]\s*)gh\s+pr\s+create(?:\s|$)/.test(command)
 }
 
+function commandOption(command: string, option: string): string | null {
+  const match = command.match(new RegExp(`(?:^|\\s)--${option}(?:=|\\s+)(?:"([^"]+)"|'([^']+)'|([^\\s;&|]+))`))
+  return match?.[1] ?? match?.[2] ?? match?.[3] ?? null
+}
+
+function commandDirectory(command: string, directory: string): string {
+  const match = command.match(/(?:^|[;&|]\s*)cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))\s*&&\s*gh\s+pr\s+create/)
+  return resolve(directory, match?.[1] ?? match?.[2] ?? match?.[3] ?? ".")
+}
+
 function createsPullRequest(amp: PluginAPI, event: ToolResultEvent): boolean {
   if (event.status !== "done") return false
   const command = amp.helpers.shellCommandFromToolCall(event)?.command ?? ""
@@ -131,20 +142,29 @@ export default async function githubRelay(amp: PluginAPI) {
   amp.on("tool.call", async (event) => {
     if (event.tool === "async_shell_command"
       && typeof event.input.command === "string"
-      && isPullRequestCommand(event.input.command)
-      && !/(?:^|\s)--(?:head|repo)(?:[=\s]|$)/.test(event.input.command)) {
-      const [repository, branch] = await Promise.all([
-        amp.$`gh repo view --json nameWithOwner`,
-        amp.$`git branch --show-current`,
+      && isPullRequestCommand(event.input.command)) {
+      const directory = commandDirectory(
+        event.input.command,
+        typeof event.input.dir === "string" ? event.input.dir : ".",
+      )
+      const repositoryOption = commandOption(event.input.command, "repo")
+      const headOption = commandOption(event.input.command, "head")
+      const [remote, branch] = await Promise.all([
+        repositoryOption
+          ? amp.$`gh repo view ${repositoryOption} --json nameWithOwner`
+          : amp.$`git -C ${directory} remote get-url origin`,
+        amp.$`git -C ${directory} branch --show-current`,
       ])
-      if (repository.exitCode === 0 && branch.exitCode === 0 && branch.stdout.trim()) {
+      if (remote.exitCode === 0 && (headOption || (branch.exitCode === 0 && branch.stdout.trim()))) {
         try {
-          const nameWithOwner = (JSON.parse(repository.stdout) as { nameWithOwner?: unknown }).nameWithOwner
-          if (typeof nameWithOwner === "string") {
-            const head = branch.stdout.trim()
-            const existing = await amp.$`gh pr list --repo ${nameWithOwner} --head ${head} --json url --limit 1`
+          const repository = repositoryOption
+            ? (JSON.parse(remote.stdout) as { nameWithOwner?: unknown }).nameWithOwner
+            : repositoryFromRemote(remote.stdout)
+          if (typeof repository === "string") {
+            const head = headOption ?? branch.stdout.trim()
+            const existing = await amp.$`gh pr list --repo ${repository} --head ${head} --json url --limit 1`
             if (existing.exitCode === 0 && (JSON.parse(existing.stdout) as unknown[]).length === 0) {
-              asyncPullRequestCreations.set(event.toolUseID, { repository: nameWithOwner, head })
+              asyncPullRequestCreations.set(event.toolUseID, { repository, head })
             }
           }
         } catch {
@@ -163,7 +183,9 @@ export default async function githubRelay(amp: PluginAPI) {
         void (async () => {
           const lease = await amp.system.executor.keepAlive()
           try {
-            for (let attempt = 0; attempt < 150; attempt++) {
+            const delays = [0, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 60_000]
+            for (const delay of delays) {
+              if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
               const result = await amp.$`gh pr list --repo ${target.repository} --head ${target.head} --json url --limit 1`
               if (result.exitCode === 0) {
                 const url = (JSON.parse(result.stdout) as Array<{ url?: unknown }>)[0]?.url
@@ -174,7 +196,6 @@ export default async function githubRelay(amp: PluginAPI) {
                   return
                 }
               }
-              await new Promise((resolve) => setTimeout(resolve, 2_000))
             }
             amp.logger.log("Could not resolve the asynchronously created pull request for automatic subscription")
           } catch (error) {
