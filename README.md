@@ -56,8 +56,8 @@ mise exec -- flyctl secrets set GITHUB_WEBHOOK_SECRET=... AMP_ALLOWED_WORKSPACE_
 mise run deploy
 ```
 
-Every pull request and push to `main` runs `mise run ci` in GitHub Actions. A successful check on
-`main` then deploys to Fly.io. Create an app-scoped deploy token with
+Every pull request and push to `main` runs `mise run ci` in GitHub Actions. After CI succeeds for
+a `main` push, a separate Deploy workflow deploys that exact commit to Fly.io. Create an app-scoped deploy token with
 `mise exec -- flyctl tokens create deploy --app amp-pr-relay`, then save the full token as the
 `FLY_API_TOKEN` repository Actions secret. The app, volume, and application secrets must exist
 before the first automated deployment.

@@ -10,8 +10,14 @@ echo "[setup] Ensuring pinned tools"
 if command -v mise >/dev/null 2>&1; then
   mise_bin="$(command -v mise)"
 else
-  curl -fsSL https://mise.run | MISE_VERSION=v2026.8.10 sh
   mise_bin="${HOME}/.local/bin/mise"
+  mise_download="$(mktemp)"
+  trap 'rm -f "$mise_download"' EXIT
+  curl -fsSL \
+    https://github.com/jdx/mise/releases/download/v2026.8.10/mise-v2026.8.10-linux-x64 \
+    -o "$mise_download"
+  echo "1f5e8795d24073904ef20ba70c1250ad6389d8c5672226d152e0ed24909ba72f  $mise_download" | sha256sum --check --status
+  install -Dm0755 "$mise_download" "$mise_bin"
 fi
 
 "$mise_bin" install
