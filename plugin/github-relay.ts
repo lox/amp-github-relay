@@ -36,13 +36,11 @@ function repositoryFromRemote(remote: string): string | null {
 }
 
 export function bridgeConfiguration(environment: Record<string, string | undefined>) {
-  const legacyUrlSelected = !environment.AMP_SUBSCRIBE_URL && Boolean(environment.AMP_GITHUB_RELAY_URL)
+  const url = environment.AMP_SUBSCRIBE_URL ?? environment.AMP_GITHUB_RELAY_URL
+  if (!url) throw new Error("AMP_SUBSCRIBE_URL is required")
+  const legacyUrlSelected = !environment.AMP_SUBSCRIBE_URL
   return {
-    url: (
-      environment.AMP_SUBSCRIBE_URL
-      ?? environment.AMP_GITHUB_RELAY_URL
-      ?? "https://lox-amp-subscribe.fly.dev"
-    ).replace(/\/$/, ""),
+    url: url.replace(/\/$/, ""),
     audience: environment.AMP_SUBSCRIBE_AUDIENCE
       ?? environment.AMP_GITHUB_RELAY_AUDIENCE
       ?? (legacyUrlSelected ? "urn:lox:amp-github-relay" : "urn:lox:amp-subscribe"),

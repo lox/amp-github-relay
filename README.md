@@ -118,14 +118,15 @@ mise exec -- bun run start
 
 `GET /healthz` is the health check. In production, keep `DATABASE_PATH` on persistent storage.
 
-The plugin uses the hosted deployment by default. Point it at another deployment with:
+Configure the plugin with the bridge deployment it should use:
 
 ```text
-AMP_SUBSCRIBE_URL=https://<bridge-host>
+AMP_SUBSCRIBE_URL=https://your-bridge.example
 AMP_SUBSCRIBE_AUDIENCE=urn:your-org:amp-subscribe
 ```
 
-Set the service's `AMP_OIDC_AUDIENCE` to the same audience. The old
+`AMP_SUBSCRIBE_URL` is required; the reusable plugin does not assume a hosted deployment. Set the
+service's `AMP_OIDC_AUDIENCE` to the same audience. The old
 `AMP_GITHUB_RELAY_URL` and `AMP_GITHUB_RELAY_AUDIENCE` plugin variables remain accepted for
 compatibility. `AMP_OIDC_AUDIENCE` accepts a comma-separated list during a migration; the checked-in
 Fly configuration accepts both the new and legacy audiences so existing plugin installations keep

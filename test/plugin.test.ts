@@ -16,9 +16,12 @@ describe("bridgeConfiguration", () => {
     })
   })
 
-  test("uses the hosted amp-subscribe defaults and honors explicit audience configuration", () => {
-    expect(bridgeConfiguration({})).toEqual({
-      url: "https://lox-amp-subscribe.fly.dev",
+  test("requires a bridge URL and honors explicit audience configuration", () => {
+    expect(() => bridgeConfiguration({})).toThrow("AMP_SUBSCRIBE_URL is required")
+    expect(bridgeConfiguration({
+      AMP_SUBSCRIBE_URL: "https://subscribe.example/",
+    })).toEqual({
+      url: "https://subscribe.example",
       audience: "urn:lox:amp-subscribe",
     })
     expect(bridgeConfiguration({
