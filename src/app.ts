@@ -4,6 +4,7 @@ import type { OrbIdentity } from "./auth"
 import { verifyHmac } from "./crypto"
 import { SubscriptionDatabase } from "./database"
 import { normalizeGitHubEvent } from "./events"
+import { fetchFeed, type FetchedFeed } from "./feeds"
 import {
   subscriptionEvents,
   type SubscriptionBehavior,
@@ -15,6 +16,7 @@ export interface SubscriptionBridgeConfig {
   githubWebhookSecret: string
   allowedWebhookHosts: string[]
   authenticate: (request: Request) => Promise<OrbIdentity>
+  fetchFeed?: (url: string, conditional?: { etag?: string | null; lastModified?: string | null }) => Promise<FetchedFeed>
 }
 
 function json(value: unknown, status = 200): Response {
@@ -54,6 +56,7 @@ function validBranch(value: unknown): value is string {
 export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
   if (config.databasePath !== ":memory:") mkdirSync(dirname(config.databasePath), { recursive: true })
   const database = new SubscriptionDatabase(config.databasePath)
+  const feedFetcher = config.fetchFeed ?? fetchFeed
 
   async function subscriptions(request: Request): Promise<Response> {
     const identity = await config.authenticate(request).catch(() => null)
@@ -185,12 +188,144 @@ export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
     return json({ accepted: true, matchedEvents: events.length, delivered, removed }, 202)
   }
 
+  async function feedSubscriptions(request: Request): Promise<Response> {
+    const identity = await config.authenticate(request).catch(() => null)
+    if (!identity) return json({ error: "unauthorized" }, 401)
+
+    if (request.method === "GET") {
+      const subscriptions = database.listFeeds(identity.threadId).map(({
+        webhookUrl: _, etag: __, lastModified: ___, ...item
+      }) => item)
+      return json({ subscriptions })
+    }
+
+    if (request.method === "POST") {
+      const input = await request.json().catch(() => null) as Record<string, unknown> | null
+      const feedUrl = input?.feedUrl
+      const webhookUrl = input?.webhookUrl
+      const behavior = input?.behavior
+      if (typeof feedUrl !== "string") return json({ error: "feedUrl is required" }, 400)
+      if (typeof webhookUrl !== "string" || !isAllowedWebhookUrl(webhookUrl, config.allowedWebhookHosts)) {
+        return json({ error: "webhookUrl host is not allowed" }, 400)
+      }
+      if (!validBehavior(behavior)) return json({ error: "invalid behavior" }, 400)
+      let fetched: FetchedFeed
+      let canonicalUrl: string
+      try {
+        const url = new URL(feedUrl)
+        url.hash = ""
+        canonicalUrl = url.href
+        fetched = await feedFetcher(feedUrl)
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "Could not read feed" }, 400)
+      }
+      if (!fetched.feed) return json({ error: "Feed returned no content" }, 400)
+      const subscription = database.upsertFeed({
+        threadId: identity.threadId,
+        feedUrl: canonicalUrl,
+        webhookUrl,
+        behavior,
+        etag: fetched.etag,
+        lastModified: fetched.lastModified,
+      }, fetched.feed.entries)
+      const { webhookUrl: _, etag: __, lastModified: ___, ...safeSubscription } = subscription
+      return json({ subscription: safeSubscription }, 201)
+    }
+
+    if (request.method === "DELETE") {
+      const input = await request.json().catch(() => null) as Record<string, unknown> | null
+      if (typeof input?.id !== "string") return json({ error: "id is required" }, 400)
+      return database.deleteFeed(identity.threadId, input.id)
+        ? new Response(null, { status: 204 })
+        : json({ error: "subscription not found" }, 404)
+    }
+
+    return json({ error: "method not allowed" }, 405)
+  }
+
+  let polling = false
+  async function pollFeeds(): Promise<{ checked: number; delivered: number; failed: number; removed: number }> {
+    if (polling) return { checked: 0, delivered: 0, failed: 0, removed: 0 }
+    polling = true
+    let checked = 0
+    let delivered = 0
+    let failed = 0
+    let removed = 0
+    try {
+      for (const subscription of database.allFeeds()) {
+        checked += 1
+        let fetched: FetchedFeed
+        try {
+          fetched = await feedFetcher(subscription.feedUrl, {
+            etag: subscription.etag,
+            lastModified: subscription.lastModified,
+          })
+        } catch {
+          failed += 1
+          continue
+        }
+        if (!fetched.feed) continue
+        let feedFailed = false
+        for (const entry of [...fetched.feed.entries].reverse()) {
+          if (!database.feedEntryChanged(subscription.id, entry)) continue
+          const body = JSON.stringify({
+            schemaVersion: 1,
+            source: "feed",
+            feed: { title: fetched.feed.title, url: subscription.feedUrl },
+            entry: {
+              id: entry.id,
+              title: entry.title,
+              url: entry.url,
+              publishedAt: entry.publishedAt,
+              updatedAt: entry.updatedAt,
+            },
+            behavior: subscription.behavior,
+          })
+          let response: Response
+          try {
+            response = await fetch(subscription.webhookUrl, {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "idempotency-key": `feed:${subscription.id}:${entry.fingerprint}`,
+              },
+              body,
+              signal: AbortSignal.timeout(10_000),
+            })
+          } catch {
+            failed += 1
+            feedFailed = true
+            continue
+          }
+          if (response.status === 404 || response.status === 410) {
+            database.deleteFeed(subscription.threadId, subscription.id)
+            removed += 1
+            break
+          }
+          if (!response.ok) {
+            failed += 1
+            feedFailed = true
+            continue
+          }
+          database.storeFeedEntry(subscription.id, entry)
+          delivered += 1
+        }
+        if (!feedFailed) database.updateFeedCache(subscription.id, fetched.etag, fetched.lastModified)
+      }
+      return { checked, delivered, failed, removed }
+    } finally {
+      polling = false
+    }
+  }
+
   return {
     database,
+    pollFeeds,
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url)
       if (request.method === "GET" && url.pathname === "/healthz") return json({ ok: true })
       if (url.pathname === "/api/subscriptions") return subscriptions(request)
+      if (url.pathname === "/api/feed-subscriptions") return feedSubscriptions(request)
       if (request.method === "POST" && url.pathname === "/github/webhook") return githubWebhook(request)
       return json({ error: "not found" }, 404)
     },

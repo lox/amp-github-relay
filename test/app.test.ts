@@ -33,6 +33,14 @@ function apiRequest(body: unknown, method = "POST") {
   })
 }
 
+function feedApiRequest(body: unknown, method = "POST") {
+  return new Request("https://bridge.test/api/feed-subscriptions", {
+    method,
+    headers: { authorization: "Bearer oidc-token", "content-type": "application/json" },
+    body: method === "GET" ? undefined : JSON.stringify(body),
+  })
+}
+
 describe("subscription bridge", () => {
   test("requires API authentication", async () => {
     const response = await bridge().fetch(new Request("https://bridge.test/api/subscriptions"))
@@ -203,5 +211,65 @@ describe("subscription bridge", () => {
       body: "{}",
     }))
     expect(response.status).toBe(401)
+  })
+
+  test("baselines a feed, then routes only new or updated entries", async () => {
+    const baseline = {
+      id: "incident-1",
+      fingerprint: "version-1",
+      title: "Queue delays",
+      url: "https://status.example/incidents/1",
+      publishedAt: "2026-08-25T10:00:00.000Z",
+      updatedAt: null,
+    }
+    let polled = false
+    const app = createSubscriptionBridge({
+      ...config,
+      fetchFeed: async () => ({
+        feed: {
+          title: "Service status",
+          entries: polled ? [
+            { ...baseline, fingerprint: "version-2", updatedAt: "2026-08-25T11:00:00.000Z" },
+            {
+              ...baseline,
+              id: "incident-2",
+              fingerprint: "new-entry",
+              title: "API errors",
+              url: "https://status.example/incidents/2",
+            },
+          ] : [baseline],
+        },
+        etag: polled ? '"v2"' : '"v1"',
+        lastModified: null,
+      }),
+    })
+    openBridges.push(app)
+    const response = await app.fetch(feedApiRequest({
+      feedUrl: "https://status.example/feed.atom",
+      webhookUrl: "https://hooks.example.test/secret-capability",
+      behavior: "notify",
+    }))
+    expect(response.status).toBe(201)
+    expect(await response.text()).not.toContain("secret-capability")
+
+    const forwarded: Array<{ body: string; idempotencyKey: string | null }> = []
+    spyOn(globalThis, "fetch").mockImplementation((async (_input, init) => {
+      forwarded.push({
+        body: String(init?.body),
+        idempotencyKey: new Headers(init?.headers).get("idempotency-key"),
+      })
+      return new Response(null, { status: 202 })
+    }) as typeof fetch)
+    polled = true
+    expect(await app.pollFeeds()).toMatchObject({ checked: 1, delivered: 2, failed: 0 })
+    expect(await app.pollFeeds()).toMatchObject({ checked: 1, delivered: 0, failed: 0 })
+    expect(forwarded).toHaveLength(2)
+    expect(JSON.parse(forwarded[0]!.body)).toMatchObject({
+      source: "feed",
+      feed: { title: "Service status", url: "https://status.example/feed.atom" },
+      entry: { id: "incident-2", title: "API errors" },
+      behavior: "notify",
+    })
+    expect(forwarded[0]?.idempotencyKey).toContain("new-entry")
   })
 })
