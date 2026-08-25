@@ -95,11 +95,23 @@ cp .env.example .env
 
 Edit `.env` to set:
 
-- `GITHUB_WEBHOOK_SECRET` to a random secret shared with your GitHub App.
 - At least one `AMP_ALLOWED_WORKSPACE_IDS`, `AMP_ALLOWED_PROJECT_IDS`, or `AMP_ALLOWED_USER_IDS`
   allowlist.
 - `AMP_OIDC_AUDIENCE` to the audience configured in the plugin.
 - `AMP_WEBHOOK_ALLOWED_HOSTS` to the host or parent domain used by Amp durable webhooks.
+
+Create the GitHub App with its required events and read-only permissions, and save its generated
+webhook secret to `.env`:
+
+```sh
+mise run setup-github-app
+```
+
+The command asks for the public bridge origin (for example, `https://subscribe.example.com`) and
+the GitHub organization that should own the app,
+then opens GitHub's App Manifest flow. After creating the app, install it on the repositories you
+want to watch. Leave the organization blank to create a personal app. For manual setup, see
+[GitHub App setup](docs/github-app.md).
 
 Start the bridge with:
 
@@ -108,9 +120,6 @@ mise exec -- bun run start
 ```
 
 Use `GET /healthz` as its health check and keep `DATABASE_PATH` on persistent storage in production.
-Create a GitHub App whose webhook points to `https://your-bridge.example/github/webhook`, then
-install it on the repositories you want to watch. [GitHub App setup](docs/github-app.md) lists the
-required events and read-only permissions.
 
 The included `fly.toml` shows one Fly.io deployment. Before deploying a copy, change its app name,
 region, and OIDC audience, then create the app and set its secrets:
