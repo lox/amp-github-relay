@@ -36,8 +36,10 @@ describe("GitHub App setup", () => {
 
   test("replaces or appends the webhook secret without touching other settings", () => {
     expect(setEnvValue("PORT=3000\nGITHUB_WEBHOOK_SECRET=old\nAMP_OIDC_AUDIENCE=test\n", "GITHUB_WEBHOOK_SECRET", "new"))
-      .toBe("PORT=3000\nGITHUB_WEBHOOK_SECRET=new\nAMP_OIDC_AUDIENCE=test\n")
+      .toBe("PORT=3000\nAMP_OIDC_AUDIENCE=test\nGITHUB_WEBHOOK_SECRET=new\n")
     expect(setEnvValue("PORT=3000", "GITHUB_WEBHOOK_SECRET", "new"))
+      .toBe("PORT=3000\nGITHUB_WEBHOOK_SECRET=new\n")
+    expect(setEnvValue("GITHUB_WEBHOOK_SECRET=old-1\nPORT=3000\nGITHUB_WEBHOOK_SECRET=old-2\n", "GITHUB_WEBHOOK_SECRET", "new"))
       .toBe("PORT=3000\nGITHUB_WEBHOOK_SECRET=new\n")
   })
 

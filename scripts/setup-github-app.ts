@@ -37,9 +37,8 @@ export function githubAppManifest(bridgeUrl: string, redirectUrl: string) {
 
 export function setEnvValue(contents: string, name: string, value: string): string {
   const line = `${name}=${value}`
-  const pattern = new RegExp(`^${name}=.*$`, "m")
-  if (pattern.test(contents)) return contents.replace(pattern, line)
-  return `${contents}${contents.endsWith("\n") || contents.length === 0 ? "" : "\n"}${line}\n`
+  const retained = contents.replace(new RegExp(`^${name}=.*(?:\n|$)`, "gm"), "")
+  return `${retained}${retained.endsWith("\n") || retained.length === 0 ? "" : "\n"}${line}\n`
 }
 
 export async function writeEnvValue(path: string, name: string, value: string): Promise<void> {
