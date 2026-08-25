@@ -155,13 +155,13 @@ async function main(): Promise<void> {
       if (url.pathname !== "/callback") return new Response("Not found", { status: 404 })
       if (url.searchParams.get("state") !== state) {
         const error = new Error("GitHub returned an invalid state value")
-        setTimeout(() => fail(error), 100)
+        fail(error)
         return resultPage("Setup failed", error.message)
       }
       const code = url.searchParams.get("code")
       if (!code) {
         const error = new Error("GitHub did not return a manifest code")
-        setTimeout(() => fail(error), 100)
+        fail(error)
         return resultPage("Setup failed", error.message)
       }
 
@@ -181,11 +181,11 @@ async function main(): Promise<void> {
 
         await writeEnvValue(".env", "GITHUB_WEBHOOK_SECRET", conversion.webhook_secret)
         const installUrl = `https://github.com/apps/${conversion.slug}/installations/new`
-        setTimeout(() => finish({ slug: conversion.slug!, installUrl }), 100)
+        finish({ slug: conversion.slug, installUrl })
         return resultPage("GitHub App created", "The webhook secret was saved to .env.", installUrl)
       } catch (cause) {
         const error = cause instanceof Error ? cause : new Error(String(cause))
-        setTimeout(() => fail(error), 100)
+        fail(error)
         return resultPage("Setup failed", error.message)
       }
     },
@@ -201,7 +201,7 @@ async function main(): Promise<void> {
     console.log("Saved its generated webhook secret to .env as GITHUB_WEBHOOK_SECRET.")
     console.log(`Install it on the repositories to watch:\n${result.installUrl}`)
   } finally {
-    server.stop()
+    await server.stop()
   }
 }
 
