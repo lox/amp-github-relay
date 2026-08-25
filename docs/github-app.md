@@ -4,7 +4,7 @@ Create one GitHub App for the amp-subscribe deployment.
 
 ## Webhook
 
-- URL: `https://lox-amp-subscribe.fly.dev/github/webhook`
+- URL: `https://your-bridge.example/github/webhook`
 - Secret: the value deployed as `GITHUB_WEBHOOK_SECRET`
 - Active: enabled
 
@@ -33,6 +33,5 @@ Install the app on the repositories whose events should be routed. amp-subscribe
 App private key until it starts calling GitHub's API itself.
 
 Orb subscription requests are separate from GitHub authentication. They use short-lived Amp OIDC
-tokens with audience `urn:lox:amp-subscribe`; the service must restrict at least one immutable
-Amp workspace, project, or user ID. The checked-in Fly configuration also accepts the legacy
-`urn:lox:amp-github-relay` audience during the rename migration.
+tokens with the audience configured by the deployment; the service must restrict at least one
+immutable Amp workspace, project, or user ID.
