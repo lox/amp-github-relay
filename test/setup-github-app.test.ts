@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { githubAppManifest, setEnvValue } from "../scripts/setup-github-app"
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { githubAppManifest, setEnvValue, writeEnvValue } from "../scripts/setup-github-app"
 
 describe("GitHub App setup", () => {
   test("builds a webhook-only manifest for all routed GitHub events", () => {
@@ -36,5 +39,19 @@ describe("GitHub App setup", () => {
       .toBe("PORT=3000\nGITHUB_WEBHOOK_SECRET=new\nAMP_OIDC_AUDIENCE=test\n")
     expect(setEnvValue("PORT=3000", "GITHUB_WEBHOOK_SECRET", "new"))
       .toBe("PORT=3000\nGITHUB_WEBHOOK_SECRET=new\n")
+  })
+
+  test("restricts an existing env file before storing the secret", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "amp-subscribe-"))
+    const path = join(directory, ".env")
+    try {
+      await writeFile(path, "PORT=3000\n", { mode: 0o644 })
+      await writeEnvValue(path, "GITHUB_WEBHOOK_SECRET", "secret")
+
+      expect(await readFile(path, "utf8")).toBe("PORT=3000\nGITHUB_WEBHOOK_SECRET=secret\n")
+      expect((await stat(path)).mode & 0o777).toBe(0o600)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 })

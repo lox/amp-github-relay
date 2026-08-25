@@ -42,6 +42,17 @@ export function setEnvValue(contents: string, name: string, value: string): stri
   return `${contents}${contents.endsWith("\n") || contents.length === 0 ? "" : "\n"}${line}\n`
 }
 
+export async function writeEnvValue(path: string, name: string, value: string): Promise<void> {
+  const contents = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return ""
+    throw error
+  })
+  await chmod(path, 0o600).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error
+  })
+  await writeFile(path, setEnvValue(contents, name, value), { mode: 0o600 })
+}
+
 function normalizeBridgeUrl(input: string): string {
   const url = new URL(input)
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
@@ -163,9 +174,7 @@ async function main(): Promise<void> {
           throw new Error(conversion.message ?? `GitHub returned HTTP ${response.status}`)
         }
 
-        const env = await readFile(".env", "utf8").catch(() => "")
-        await writeFile(".env", setEnvValue(env, "GITHUB_WEBHOOK_SECRET", conversion.webhook_secret))
-        await chmod(".env", 0o600)
+        await writeEnvValue(".env", "GITHUB_WEBHOOK_SECRET", conversion.webhook_secret)
         const installUrl = `https://github.com/apps/${conversion.slug}/installations/new`
         setTimeout(() => finish({ slug: conversion.slug!, installUrl }), 100)
         return resultPage("GitHub App created", "The webhook secret was saved to .env.", installUrl)
