@@ -32,15 +32,20 @@ You need a running amp-subscribe bridge and its GitHub App installed on the repo
 watch. To run your own bridge, see [Self-hosting](#self-hosting).
 
 1. Install [`plugin/github-relay.ts`](plugin/github-relay.ts) as
-   `.amp/plugins/github-relay.ts` in your project or global Amp plugin directory.
-2. Configure the plugin with your bridge URL and OIDC audience:
+   `.amp/plugins/github-relay.ts` for one project or
+   `~/.config/amp/plugins/github-relay.ts` for every project.
+2. Configure the plugin with your bridge URL and OIDC audience. These commands make the settings
+   available to plugins installed in either location:
 
-   ```text
-   AMP_SUBSCRIBE_URL=https://your-bridge.example
-   AMP_SUBSCRIBE_AUDIENCE=urn:your-org:amp-subscribe
+   ```sh
+   printf %s https://your-bridge.example | \
+     amp secrets set AMP_SUBSCRIBE_URL --user --env --data-file -
+   printf %s urn:your-org:amp-subscribe | \
+     amp secrets set AMP_SUBSCRIBE_AUDIENCE --user --env --data-file -
    ```
 
-3. Reload Amp's plugins, then ask Amp:
+3. Run `amp orb restart-processes` to load the new environment, then run `plugins: reload` from
+   Amp's command palette. You can now ask Amp:
 
    ```text
    Subscribe this thread to https://github.com/owner/repo/pull/123.
