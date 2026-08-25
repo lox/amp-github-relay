@@ -2,17 +2,17 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { githubAppManifest, setEnvValue, writeEnvValue } from "../scripts/setup-github-app"
+import { githubAppManifest, normalizeBridgeUrl, setEnvValue, writeEnvValue } from "../scripts/setup-github-app"
 
 describe("GitHub App setup", () => {
   test("builds a webhook-only manifest for all routed GitHub events", () => {
-    expect(githubAppManifest("https://subscribe.example.com/bridge", "http://127.0.0.1:1234/callback")).toEqual({
+    expect(githubAppManifest("https://subscribe.example.com", "http://127.0.0.1:1234/callback")).toEqual({
       name: "amp-subscribe",
-      url: "https://subscribe.example.com/bridge",
+      url: "https://subscribe.example.com",
       description: "Routes GitHub events to subscribed Amp threads",
       redirect_url: "http://127.0.0.1:1234/callback",
       public: false,
-      hook_attributes: { url: "https://subscribe.example.com/bridge/github/webhook", active: true },
+      hook_attributes: { url: "https://subscribe.example.com/github/webhook", active: true },
       default_permissions: {
         metadata: "read",
         contents: "read",
@@ -32,6 +32,11 @@ describe("GitHub App setup", () => {
         "workflow_run",
       ],
     })
+  })
+
+  test("requires the public bridge origin", () => {
+    expect(normalizeBridgeUrl("https://subscribe.example.com/")).toBe("https://subscribe.example.com")
+    expect(() => normalizeBridgeUrl("https://subscribe.example.com/bridge")).toThrow("without credentials, a path")
   })
 
   test("replaces or appends the webhook secret without touching other settings", () => {

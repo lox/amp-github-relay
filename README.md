@@ -107,7 +107,8 @@ webhook secret to `.env`:
 mise run setup-github-app
 ```
 
-The command asks for the public bridge URL and the GitHub organization that should own the app,
+The command asks for the public bridge origin (for example, `https://subscribe.example.com`) and
+the GitHub organization that should own the app,
 then opens GitHub's App Manifest flow. After creating the app, install it on the repositories you
 want to watch. Leave the organization blank to create a personal app. For manual setup, see
 [GitHub App setup](docs/github-app.md).

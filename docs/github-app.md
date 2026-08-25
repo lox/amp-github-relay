@@ -8,10 +8,10 @@ The easiest setup uses GitHub's App Manifest flow:
 mise run setup-github-app
 ```
 
-Give the command the public URL of your deployed bridge. It creates a private GitHub App with the
-settings below, writes GitHub's generated webhook secret to `.env`, and links to the installation
-page. The generated private key and client secret are deliberately not stored because amp-subscribe
-does not call GitHub's API.
+Give the command the public origin of your deployed bridge, such as `https://subscribe.example.com`.
+It creates a private GitHub App with the settings below, writes GitHub's generated webhook secret
+to `.env`, and links to the installation page. The generated private key and client secret are
+deliberately not stored because amp-subscribe does not call GitHub's API.
 
 The rest of this page describes the equivalent manual setup.
 

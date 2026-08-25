@@ -20,7 +20,7 @@ export function githubAppManifest(bridgeUrl: string, redirectUrl: string) {
     redirect_url: redirectUrl,
     public: false,
     hook_attributes: {
-      url: new URL("github/webhook", `${bridgeUrl.replace(/\/$/, "")}/`).href,
+      url: new URL("/github/webhook", bridgeUrl).href,
       active: true,
     },
     default_permissions: {
@@ -57,13 +57,12 @@ export async function writeEnvValue(path: string, name: string, value: string): 
   }
 }
 
-function normalizeBridgeUrl(input: string): string {
+export function normalizeBridgeUrl(input: string): string {
   const url = new URL(input)
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
-    throw new Error("Bridge URL must be a public HTTPS URL without credentials, a query, or a fragment")
+  if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+    throw new Error("Bridge URL must be a public HTTPS origin without credentials, a path, query, or fragment")
   }
-  url.pathname = url.pathname.replace(/\/$/, "") || "/"
-  return url.href.replace(/\/$/, "")
+  return url.origin
 }
 
 function registrationUrl(organization: string, state: string): string {
