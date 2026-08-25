@@ -6,13 +6,13 @@ import { githubAppManifest, setEnvValue, writeEnvValue } from "../scripts/setup-
 
 describe("GitHub App setup", () => {
   test("builds a webhook-only manifest for all routed GitHub events", () => {
-    expect(githubAppManifest("https://subscribe.example.com", "http://127.0.0.1:1234/callback")).toEqual({
+    expect(githubAppManifest("https://subscribe.example.com/bridge", "http://127.0.0.1:1234/callback")).toEqual({
       name: "amp-subscribe",
-      url: "https://subscribe.example.com",
+      url: "https://subscribe.example.com/bridge",
       description: "Routes GitHub events to subscribed Amp threads",
       redirect_url: "http://127.0.0.1:1234/callback",
       public: false,
-      hook_attributes: { url: "https://subscribe.example.com/github/webhook", active: true },
+      hook_attributes: { url: "https://subscribe.example.com/bridge/github/webhook", active: true },
       default_permissions: {
         metadata: "read",
         contents: "read",
@@ -41,7 +41,7 @@ describe("GitHub App setup", () => {
       .toBe("PORT=3000\nGITHUB_WEBHOOK_SECRET=new\n")
   })
 
-  test("restricts an existing env file before storing the secret", async () => {
+  test("atomically stores the secret in a restricted env file", async () => {
     const directory = await mkdtemp(join(tmpdir(), "amp-subscribe-"))
     const path = join(directory, ".env")
     try {

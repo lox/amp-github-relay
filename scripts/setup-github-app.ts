@@ -1,4 +1,4 @@
-import { chmod, readFile, writeFile } from "node:fs/promises"
+import { readFile, rename, unlink, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline/promises"
 
 const githubEvents = [
@@ -20,7 +20,7 @@ export function githubAppManifest(bridgeUrl: string, redirectUrl: string) {
     redirect_url: redirectUrl,
     public: false,
     hook_attributes: {
-      url: new URL("/github/webhook", bridgeUrl).href,
+      url: new URL("github/webhook", `${bridgeUrl.replace(/\/$/, "")}/`).href,
       active: true,
     },
     default_permissions: {
@@ -47,10 +47,15 @@ export async function writeEnvValue(path: string, name: string, value: string): 
     if (error.code === "ENOENT") return ""
     throw error
   })
-  await chmod(path, 0o600).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "ENOENT") throw error
-  })
-  await writeFile(path, setEnvValue(contents, name, value), { mode: 0o600 })
+  const temporaryPath = `${path}.${crypto.randomUUID()}.tmp`
+  try {
+    await writeFile(temporaryPath, setEnvValue(contents, name, value), { mode: 0o600, flag: "wx" })
+    await rename(temporaryPath, path)
+  } finally {
+    await unlink(temporaryPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error
+    })
+  }
 }
 
 function normalizeBridgeUrl(input: string): string {
