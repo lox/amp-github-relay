@@ -7,6 +7,7 @@ import { normalizeGitHubEvent } from "./events"
 import { fetchFeed, type FetchedFeed } from "./feeds"
 import {
   subscriptionEvents,
+  type RoutedEvent,
   type SubscriptionBehavior,
   type SubscriptionEvent,
 } from "./types"
@@ -17,6 +18,25 @@ export interface SubscriptionBridgeConfig {
   allowedWebhookHosts: string[]
   authenticate: (request: Request) => Promise<OrbIdentity>
   fetchFeed?: (url: string, conditional?: { etag?: string | null; lastModified?: string | null }) => Promise<FetchedFeed>
+}
+
+function relaySuppressionReason(event: RoutedEvent): string | null {
+  if (event.githubEvent === "pull_request" && event.action === "edited"
+    && event.detail?.kind === "pull_request" && event.detail.changedFields?.length
+    && event.detail.changedFields.every((field) => field === "body" || field === "title")) {
+    return "pull_request_edit"
+  }
+  const detail = event.detail
+  const checkEvent = event.githubEvent === "check_run" || event.githubEvent === "check_suite"
+    || event.githubEvent === "workflow_run"
+  if (!checkEvent) return null
+  if (!detail || (detail.kind !== "check_run" && detail.kind !== "check_suite" && detail.kind !== "workflow_run")) {
+    return "check_lifecycle"
+  }
+  if (detail.kind !== event.githubEvent) {
+    return "check_lifecycle"
+  }
+  return detail.status === "completed" && detail.conclusion ? null : "check_lifecycle"
 }
 
 function json(value: unknown, status = 200): Response {
@@ -134,7 +154,9 @@ export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
     } catch {
       return json({ error: "invalid JSON" }, 400)
     }
-    const events = normalizeGitHubEvent(eventName, deliveryId, payload)
+    const normalizedEvents = normalizeGitHubEvent(eventName, deliveryId, payload)
+    const events = normalizedEvents.filter((event) => relaySuppressionReason(event) === null)
+    const suppressed = normalizedEvents.length - events.length
     let delivered = 0
     let failed = 0
     let removed = 0
@@ -183,9 +205,9 @@ export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
       }
     }
     if (failed > 0) {
-      return json({ error: "Amp webhook delivery failed", failed, delivered, removed }, 502)
+      return json({ error: "Amp webhook delivery failed", failed, delivered, removed, suppressed }, 502)
     }
-    return json({ accepted: true, matchedEvents: events.length, delivered, removed }, 202)
+    return json({ accepted: true, matchedEvents: events.length, delivered, removed, suppressed }, 202)
   }
 
   async function feedSubscriptions(request: Request): Promise<Response> {

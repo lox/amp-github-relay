@@ -272,4 +272,46 @@ describe("subscription bridge", () => {
     })
     expect(forwarded[0]?.idempotencyKey).toContain("new-entry")
   })
+
+  test("drops check lifecycle noise before consuming durable webhook capacity", async () => {
+    const app = bridge()
+    await app.fetch(apiRequest({
+      repository: "lox/project",
+      pullRequestNumber: 17,
+      webhookUrl: "https://hooks.example.test/secret-capability",
+      events: ["checks"],
+      behavior: "investigate",
+    }))
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 202 }))
+    const send = async (deliveryId: string, status: string, conclusion: string | null) => {
+      const body = JSON.stringify({
+        action: status === "completed" ? "completed" : status,
+        repository: { id: 42, full_name: "lox/project" },
+        check_run: {
+          id: 94,
+          status,
+          conclusion,
+          head_sha: "a".repeat(40),
+          pull_requests: [{ number: 17 }],
+        },
+      })
+      return app.fetch(new Request("https://bridge.test/github/webhook", {
+        method: "POST",
+        headers: {
+          "x-hub-signature-256": await hmacSha256("github-secret", body),
+          "x-github-event": "check_run",
+          "x-github-delivery": deliveryId,
+        },
+        body,
+      }))
+    }
+
+    const queued = await send("delivery-queued", "queued", null)
+    expect(await queued.json()).toMatchObject({ matchedEvents: 0, delivered: 0, suppressed: 1 })
+    expect(fetchSpy).toHaveBeenCalledTimes(0)
+
+    const failure = await send("delivery-failure", "completed", "failure")
+    expect(await failure.json()).toMatchObject({ matchedEvents: 1, delivered: 1, suppressed: 0 })
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
 })

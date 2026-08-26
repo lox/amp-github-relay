@@ -36,6 +36,7 @@ export type RoutedEventDetail =
       headSha?: string
       beforeSha?: string
       afterSha?: string
+      changedFields?: Array<"body" | "title" | "base">
       requestedReviewer?: string
       requestedTeam?: string
       assignee?: string
@@ -61,7 +62,9 @@ export type RoutedEventDetail =
       id: number
       url: string
       author?: string
+      reviewId?: number
       inReplyToId?: number
+      commitSha?: string
       line?: number
       startLine?: number
       side?: "LEFT" | "RIGHT"
@@ -157,6 +160,6 @@ interface RoutedEventBase {
 }
 
 export type RoutedEvent = RoutedEventBase & (
-  | { targetType: "pull_request"; pullRequest: { number: number; url: string } }
+  | { targetType: "pull_request"; pullRequest: { number: number; url: string; headSha?: string } }
   | { targetType: "branch"; branch: { name: string; url: string } }
 )

@@ -77,8 +77,10 @@ durable webhook URLs, so renaming it would disconnect existing subscriptions.
 - `investigate` (default): inspect and explain the event without changing external state.
 - `implement`: make and verify local changes, but do not push without permission.
 
-When Amp creates a PR directly with `gh pr create`, the plugin automatically watches it in
-`investigate` mode. You can also ask Amp to list or remove this thread's subscriptions.
+When Amp creates a PR directly with `gh pr create`, the plugin automatically watches commits,
+reviews, comments, checks, merge, and close events in `investigate` mode. Explicit subscriptions
+still default to every supported event. You can also ask Amp to list or remove this thread's
+subscriptions.
 
 ## How it works
 
@@ -96,6 +98,19 @@ webhook. Amp stores the event and wakes the thread even when its orb is asleep.
 For feeds, the bridge polls public HTTPS URLs every five minutes by default. Set
 `FEED_POLL_INTERVAL_SECONDS` to change the interval (minimum 30 seconds). Conditional requests are
 used when feeds provide ETag or Last-Modified headers.
+
+The bridge drops queued and in-progress check lifecycle events before they consume durable webhook
+capacity. The plugin immediately queues terminal failures, but routine events do not steer active
+work. It debounces successful checks into one current-head summary, removes check-run/check-suite
+overlap, keeps workflow summaries that cannot be safely correlated, batches review submissions with
+their line comments, and queues agent-authored comment replies without steering active work. It also
+suppresses stale-SHA checks and pull request body/title edits. Plugin
+logs include delivery reasons, steering decisions, and cumulative received/delivered/suppressed/
+batched counts.
+
+GitHub delivery IDs are deduplicated durably by the bridge. Thread-side batching and semantic
+deduplication are process-local; as with any at-least-once handler, a process loss immediately after
+appending a message can still produce a duplicate when Amp retries the event.
 
 ## Self-hosting
 
