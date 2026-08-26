@@ -147,6 +147,8 @@ function detailFor(eventName: string, payload: JsonObject, fullName: string): Ro
     const headSha = sha(object(pullRequest.head)?.sha)
     const beforeSha = sha(payload.before)
     const afterSha = sha(payload.after)
+    const changes = object(payload.changes)
+    const changedFields = (["body", "title", "base"] as const).filter((field) => object(changes?.[field]))
     const requestedReviewer = principal(object(payload.requested_reviewer)?.login)
     const requestedTeam = principal(object(payload.requested_team)?.slug)
     const assignee = principal(object(payload.assignee)?.login)
@@ -156,6 +158,7 @@ function detailFor(eventName: string, payload: JsonObject, fullName: string): Ro
     if (headSha) value.headSha = headSha
     if (beforeSha) value.beforeSha = beforeSha
     if (afterSha) value.afterSha = afterSha
+    if (changedFields.length) value.changedFields = changedFields
     if (requestedReviewer) value.requestedReviewer = requestedReviewer
     if (requestedTeam) value.requestedTeam = requestedTeam
     if (assignee) value.assignee = assignee
@@ -200,12 +203,16 @@ function detailFor(eventName: string, payload: JsonObject, fullName: string): Ro
         url: `https://github.com/${fullName}/pull/${pullRequestNumber}#discussion_r${id}`,
       }
       const author = principal(object(comment.user)?.login)
+      const reviewId = positiveNumber(comment.pull_request_review_id)
       const inReplyToId = positiveNumber(comment.in_reply_to_id)
+      const commitSha = sha(comment.commit_id)
       const line = positiveNumber(comment.line)
       const startLine = positiveNumber(comment.start_line)
       const side = enumValue(comment.side, ["LEFT", "RIGHT"] as const)
       if (author) value.author = author
+      if (reviewId) value.reviewId = reviewId
       if (inReplyToId) value.inReplyToId = inReplyToId
+      if (commitSha) value.commitSha = commitSha
       if (line) value.line = line
       if (startLine) value.startLine = startLine
       if (side) value.side = side

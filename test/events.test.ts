@@ -71,6 +71,21 @@ describe("normalizeGitHubEvent", () => {
     })[0]?.event).toBe("merged")
   })
 
+  test("classifies edited PR fields without forwarding their values", () => {
+    const event = normalizeGitHubEvent("pull_request", "delivery-edit", {
+      action: "edited",
+      repository,
+      pull_request: pullRequest,
+      changes: {
+        body: { from: "UNTRUSTED_SENTINEL" },
+        base: { ref: { from: "old-base" }, sha: { from: beforeSha } },
+      },
+    })[0]
+    expect(event?.detail).toMatchObject({ kind: "pull_request", changedFields: ["body", "base"] })
+    expect(JSON.stringify(event)).not.toContain("UNTRUSTED_SENTINEL")
+    expect(JSON.stringify(event)).not.toContain("old-base")
+  })
+
   test("includes review state, author, URL, and commit", () => {
     const event = normalizeGitHubEvent("pull_request_review", "delivery-review", {
       action: "submitted",
@@ -104,7 +119,9 @@ describe("normalizeGitHubEvent", () => {
         id: 92,
         html_url: "https://github.com/lox/project/pull/17#discussion_r92",
         user: { login: "commenter" },
+        pull_request_review_id: 91,
         in_reply_to_id: 90,
+        commit_id: headSha,
         line: 27,
         start_line: 24,
         side: "RIGHT",
@@ -115,7 +132,9 @@ describe("normalizeGitHubEvent", () => {
       id: 92,
       url: "https://github.com/lox/project/pull/17#discussion_r92",
       author: "commenter",
+      reviewId: 91,
       inReplyToId: 90,
+      commitSha: headSha,
       line: 27,
       startLine: 24,
       side: "RIGHT",
