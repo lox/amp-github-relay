@@ -723,6 +723,10 @@ describe("GitHubEventCoalescer", () => {
     expect((await coalescer.handle(checkEvent("check_run", 300, "completed", "success", {
       headSha: "a".repeat(40),
     }), deliver)).suppressed).toBe("stale check for superseded head")
+    expect((await coalescer.handle({
+      ...checkEvent("check_run", 301, "completed", "failure", { headSha: "a".repeat(40) }),
+      pullRequest: { ...baseEvent.pullRequest, headSha: "a".repeat(40) },
+    }, deliver)).suppressed).toBe("stale check for superseded head")
   })
 
   test("settles a pending success batch as suppressed when the head advances", async () => {
@@ -825,5 +829,48 @@ describe("GitHubEventCoalescer", () => {
       .toBe("stale review for superseded head")
     expect((await coalescer.handle(staleReview("dismissed", "review-dismissed"), deliver)).suppressed)
       .toBe("stale review for superseded head")
+  })
+
+  test("preserves newly submitted review feedback created against an older diff", async () => {
+    const coalescer = new GitHubEventCoalescer(5, 5, 50)
+    const deliveries: string[] = []
+    const deliver = async (delivery: { content: string }) => { deliveries.push(delivery.content) }
+    const review = {
+      ...baseEvent,
+      deliveryId: "old-diff-review-submitted",
+      pullRequest: { ...baseEvent.pullRequest, headSha: "b".repeat(40) },
+      detail: {
+        kind: "pull_request_review",
+        id: 500,
+        url: "https://github.com/lox/project/pull/17#pullrequestreview-500",
+        state: "changes_requested",
+        author: "reviewer",
+        commitSha: "a".repeat(40),
+      },
+    }
+    const comment = {
+      ...baseEvent,
+      deliveryId: "old-diff-review-comment-created",
+      githubEvent: "pull_request_review_comment",
+      event: "review_comments",
+      action: "created",
+      pullRequest: { ...baseEvent.pullRequest, headSha: "b".repeat(40) },
+      detail: {
+        kind: "pull_request_review_comment",
+        id: 501,
+        reviewId: 500,
+        url: "https://github.com/lox/project/pull/17#discussion_r501",
+        author: "reviewer",
+        commitSha: "a".repeat(40),
+        line: 12,
+      },
+    }
+    await Promise.all([
+      coalescer.handle(review, deliver),
+      coalescer.handle(comment, deliver),
+    ])
+    expect(deliveries).toHaveLength(1)
+    expect(deliveries[0]).toContain("Review 500: changes requested")
+    expect(deliveries[0]).toContain("Review comment 501")
   })
 })

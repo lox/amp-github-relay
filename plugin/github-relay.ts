@@ -725,10 +725,12 @@ export class GitHubEventCoalescer {
     }
 
     const pullRequest = object(metadata.pullRequest)
-    const targetHeadSha = text(pullRequest ?? {}, "headSha") ?? this.currentHeads.get(target)
+    const targetHeadSha = this.currentHeads.get(target) ?? text(pullRequest ?? {}, "headSha")
     const detailCommitSha = text(detail ?? {}, "commitSha")
-    if ((detailKind === "pull_request_review" || detailKind === "pull_request_review_comment")
-      && targetHeadSha && detailCommitSha && targetHeadSha !== detailCommitSha) {
+    const staleReviewCleanup = (detailKind === "pull_request_review"
+      && (action === "edited" || action === "dismissed"))
+      || (detailKind === "pull_request_review_comment" && (action === "edited" || action === "deleted"))
+    if (staleReviewCleanup && targetHeadSha && detailCommitSha && targetHeadSha !== detailCommitSha) {
       return suppress("stale review for superseded head")
     }
 
