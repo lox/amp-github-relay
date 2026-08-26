@@ -343,6 +343,7 @@ function promptMetadata(payload: JsonObject): JsonObject {
   const branchValue = branchName(branch?.name)
   const branchValueUrl = githubUrl(branch?.url)
   const canonicalBranchUrl = fullName && branchValue ? branchUrl(fullName, branchValue) : undefined
+  const pullRequestHeadSha = sha(pullRequest?.headSha)
   const targetType = enumValue(payload.targetType, ["pull_request", "branch"] as const)
     ?? (pullRequest ? "pull_request" : undefined)
   const validTarget = targetType === "pull_request"
@@ -367,7 +368,11 @@ function promptMetadata(payload: JsonObject): JsonObject {
     targetType,
     repository: { id: repositoryId, fullName },
     ...(targetType === "pull_request"
-      ? { pullRequest: { number: pullRequestNumber, url: canonicalPullRequestUrl } }
+      ? { pullRequest: {
+          number: pullRequestNumber,
+          url: canonicalPullRequestUrl,
+          ...(pullRequestHeadSha ? { headSha: pullRequestHeadSha } : {}),
+        } }
       : { branch: { name: branchValue, url: canonicalBranchUrl } }),
   }
   const sender = principal(payload.sender)
@@ -535,9 +540,7 @@ type PendingKind = "ci-success" | "review"
 interface PendingEvent {
   value: unknown
   metadata: JsonObject
-  target: string
-  kind: PendingKind
-  dueAt: number
+  signature: string
 }
 
 export interface CoalescedDelivery {
@@ -547,9 +550,19 @@ export interface CoalescedDelivery {
 }
 
 export interface CoalescingResult {
-  deliveries: CoalescedDelivery[]
   suppressed?: string
-  waitUntil?: number
+}
+
+interface PendingBatch {
+  key: string
+  kind: PendingKind
+  events: Map<string, PendingEvent>
+  dueAt: number
+  expiresAt: number
+  claimed: boolean
+  completion: Promise<CoalescingResult>
+  resolve: (result: CoalescingResult) => void
+  reject: (error: unknown) => void
 }
 
 function targetKey(metadata: JsonObject): string {
@@ -601,6 +614,37 @@ function semanticSignature(metadata: JsonObject): string {
   return JSON.stringify(semantic)
 }
 
+function waitUntilOrCompletion(
+  timestamp: number,
+  completion: Promise<CoalescingResult>,
+  signal?: AbortSignal,
+): Promise<CoalescingResult | null> {
+  if (signal?.aborted) return Promise.reject(signal.reason)
+  const delay = Math.max(0, timestamp - Date.now())
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => done(null), delay)
+    signal?.addEventListener("abort", aborted, { once: true })
+    completion.then(done, failed)
+
+    function done(result: CoalescingResult | null) {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", aborted)
+      resolve(result)
+    }
+
+    function failed(error: unknown) {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", aborted)
+      reject(error)
+    }
+
+    function aborted() {
+      clearTimeout(timer)
+      reject(signal?.reason)
+    }
+  })
+}
+
 /**
  * Thread-local event policy. The bridge provides durable delivery-ID deduplication; this layer
  * removes semantic overlap and batches events that only have value as a group.
@@ -608,17 +652,21 @@ function semanticSignature(metadata: JsonObject): string {
 export class GitHubEventCoalescer {
   private readonly currentHeads = new Map<string, string>()
   private readonly seen = new Set<string>()
-  private readonly pending = new Map<string, PendingEvent>()
-  private readonly deliverySignatures = new WeakMap<CoalescedDelivery, string[]>()
-  private readonly deliveryPending = new WeakMap<CoalescedDelivery, Array<[string, PendingEvent]>>()
+  private readonly pendingSignatures = new Map<string, Promise<unknown>>()
+  private readonly batches = new Map<string, PendingBatch>()
 
   constructor(
     private readonly agentLogin?: string,
     private readonly reviewDelayMs = 1_000,
     private readonly successDelayMs = 3_000,
+    private readonly maximumBatchAgeMs = 20_000,
   ) {}
 
-  ingest(value: unknown, now = Date.now()): CoalescingResult {
+  async handle(
+    value: unknown,
+    deliver: (delivery: CoalescedDelivery) => Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<CoalescingResult> {
     const payload = object(value)
     if (!payload) throw new Error("Rejected malformed GitHub event")
     const metadata = promptMetadata(payload)
@@ -630,10 +678,15 @@ export class GitHubEventCoalescer {
     const detailKind = detail && text(detail, "kind")
     const detailId = detail && positiveInteger(detail.id)
     const signature = semanticSignature(metadata)
-    if (this.seen.has(signature)) return { deliveries: [], suppressed: "semantic duplicate" }
+    if (this.seen.has(signature)) return { suppressed: "semantic duplicate" }
+    const pending = this.pendingSignatures.get(signature)
+    if (pending) {
+      await pending
+      return { suppressed: "semantic duplicate" }
+    }
     const suppress = (reason: string): CoalescingResult => {
       this.remember(signature)
-      return { deliveries: [], suppressed: reason }
+      return { suppressed: reason }
     }
 
     const changedFields = detail?.changedFields
@@ -652,26 +705,28 @@ export class GitHubEventCoalescer {
       const beforeSha = text(detail!, "beforeSha")
       const afterSha = text(detail!, "afterSha") ?? text(detail!, "headSha")
       const current = this.currentHeads.get(target)
-      if (current && beforeSha && current !== beforeSha && current !== afterSha) {
+      if (action === "synchronize" && current && beforeSha && current !== beforeSha && current !== afterSha) {
         return suppress("stale pull request update")
       }
-      if (afterSha) {
+      if (action === "synchronize" && afterSha) {
         this.currentHeads.set(target, afterSha)
-        for (const [key, pending] of this.pending) {
-          const pendingSha = text(object(pending.metadata.detail) ?? {}, "headSha")
-          if (pending.target === target && pending.kind === "ci-success" && pendingSha && pendingSha !== afterSha) {
-            this.pending.delete(key)
-          }
-        }
+        this.suppressSupersededBatches(target, afterSha)
       }
+    }
+
+    const pullRequest = object(metadata.pullRequest)
+    const targetHeadSha = text(pullRequest ?? {}, "headSha") ?? this.currentHeads.get(target)
+    const detailCommitSha = text(detail ?? {}, "commitSha")
+    if ((detailKind === "pull_request_review" || detailKind === "pull_request_review_comment")
+      && targetHeadSha && detailCommitSha && targetHeadSha !== detailCommitSha) {
+      return suppress("stale review for superseded head")
     }
 
     if (isCheckDetail(detail)) {
       const status = text(detail!, "status")
       const conclusion = text(detail!, "conclusion")
       const headSha = text(detail!, "headSha")
-      const current = this.currentHeads.get(target)
-      if (headSha && current && headSha !== current) {
+      if (headSha && targetHeadSha && headSha !== targetHeadSha) {
         return suppress("stale check for superseded head")
       }
       if (status !== "completed" || !conclusion) {
@@ -681,104 +736,174 @@ export class GitHubEventCoalescer {
 
       const successful = conclusion === "success" || conclusion === "neutral" || conclusion === "skipped"
       if (!successful) {
-        this.pending.delete(`${target}:ci:${headSha ?? "unknown"}:${checkUnit(detail!)}`)
         const delivery = { content: eventPrompt(value), urgent: true, reason: "terminal check failure" }
-        this.deliverySignatures.set(delivery, [signature])
-        return { deliveries: [delivery] }
+        return this.deliver(signature, delivery, deliver)
       }
 
-      const key = `${target}:ci:${headSha ?? "unknown"}:${checkUnit(detail!)}`
-      const dueAt = now + this.successDelayMs
-      for (const pending of this.pending.values()) {
-        const pendingSha = text(object(pending.metadata.detail) ?? {}, "headSha")
-        if (pending.kind === "ci-success" && pending.target === target && pendingSha === headSha) {
-          pending.dueAt = dueAt
-        }
-      }
-      this.pending.set(key, { value, metadata, target, kind: "ci-success", dueAt })
-      return { deliveries: [], waitUntil: dueAt }
+      return this.enqueue(
+        "ci-success",
+        `${target}:${headSha ?? targetHeadSha ?? "unknown"}`,
+        checkUnit(detail!),
+        { value, metadata, signature },
+        this.successDelayMs,
+        deliver,
+        signal,
+      )
     }
 
     if (githubEvent === "pull_request_review" && action === "submitted") {
-      const dueAt = now + this.reviewDelayMs
-      for (const pending of this.pending.values()) {
-        if (pending.kind === "review" && pending.target === target) pending.dueAt = dueAt
-      }
-      this.pending.set(`${target}:review:${detailId}`, { value, metadata, target, kind: "review", dueAt })
-      return { deliveries: [], waitUntil: dueAt }
+      return this.enqueue(
+        "review",
+        target,
+        `review:${detailId}`,
+        { value, metadata, signature },
+        this.reviewDelayMs,
+        deliver,
+        signal,
+      )
     }
 
     if (githubEvent === "pull_request_review_comment") {
-      const dueAt = now + this.reviewDelayMs
-      for (const pending of this.pending.values()) {
-        if (pending.kind === "review" && pending.target === target) pending.dueAt = dueAt
-      }
-      this.pending.set(`${target}:comment:${detailId}`, { value, metadata, target, kind: "review", dueAt })
-      return { deliveries: [], waitUntil: dueAt }
+      return this.enqueue(
+        "review",
+        target,
+        `comment:${detailId}`,
+        { value, metadata, signature },
+        this.reviewDelayMs,
+        deliver,
+        signal,
+      )
     }
 
     const delivery = { content: eventPrompt(value), urgent: false, reason: "routine event" }
-    this.deliverySignatures.set(delivery, [signature])
-    return { deliveries: [delivery] }
+    return this.deliver(signature, delivery, deliver)
   }
 
-  flush(now = Date.now()): CoalescedDelivery[] {
-    const ready = [...this.pending.entries()].filter(([, event]) => event.dueAt <= now)
-    for (const [key] of ready) this.pending.delete(key)
-    const groups = new Map<string, PendingEvent[]>()
-    for (const [, event] of ready) {
-      const key = `${event.kind}:${event.target}`
-      groups.set(key, [...(groups.get(key) ?? []), event])
+  private async deliver(
+    signature: string,
+    delivery: CoalescedDelivery,
+    append: (delivery: CoalescedDelivery) => Promise<void>,
+  ): Promise<CoalescingResult> {
+    const completion = append(delivery).then(() => this.remember(signature))
+    this.pendingSignatures.set(signature, completion)
+    try {
+      await completion
+      return {}
+    } finally {
+      if (this.pendingSignatures.get(signature) === completion) this.pendingSignatures.delete(signature)
     }
+  }
 
-    const deliveries: CoalescedDelivery[] = []
-    for (const events of groups.values()) {
-      if (events[0]!.kind === "review") {
-        const commentReviewIds = new Set(events.flatMap((event) => {
-          const reviewId = positiveInteger(object(event.metadata.detail)?.reviewId)
-          return reviewId ? [reviewId] : []
-        }))
-        const filtered = events.filter((event) => {
-          const detail = object(event.metadata.detail)
-          return text(detail ?? {}, "kind") !== "pull_request_review"
-            || !commentReviewIds.has(positiveInteger(detail?.id) ?? -1)
-        })
-        const delivery = { content: batchPrompt(filtered, "review batch"), urgent: false, reason: "review batch" }
-        deliveries.push(delivery)
-        this.deliveryPending.set(delivery, ready.filter(([, event]) => events.includes(event)))
-        continue
+  private async enqueue(
+    kind: PendingKind,
+    target: string,
+    eventKey: string,
+    event: PendingEvent,
+    delayMs: number,
+    deliver: (delivery: CoalescedDelivery) => Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<CoalescingResult> {
+    const key = `${kind}:${target}`
+    const now = Date.now()
+    let batch = this.batches.get(key)
+    if (!batch || batch.claimed) {
+      let resolve!: (result: CoalescingResult) => void
+      let reject!: (error: unknown) => void
+      const completion = new Promise<CoalescingResult>((onResolve, onReject) => {
+        resolve = onResolve
+        reject = onReject
+      })
+      batch = {
+        key,
+        kind,
+        events: new Map(),
+        dueAt: now + delayMs,
+        expiresAt: now + this.maximumBatchAgeMs,
+        claimed: false,
+        completion,
+        resolve,
+        reject,
       }
+      this.batches.set(key, batch)
+    }
+    batch.dueAt = Math.min(now + delayMs, batch.expiresAt)
+    batch.events.set(eventKey, event)
+    this.pendingSignatures.set(event.signature, batch.completion)
 
-      const checkRunsByApp = new Set(events.flatMap((event) => {
-        const detail = object(event.metadata.detail)
-        return text(detail ?? {}, "kind") === "check_run" ? [text(detail!, "appSlug") ?? ""] : []
+    try {
+      return await this.coordinate(batch, deliver, signal)
+    } finally {
+      if (this.pendingSignatures.get(event.signature) === batch.completion) {
+        this.pendingSignatures.delete(event.signature)
+      }
+    }
+  }
+
+  private async coordinate(
+    batch: PendingBatch,
+    deliver: (delivery: CoalescedDelivery) => Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<CoalescingResult> {
+    while (!batch.claimed) {
+      const completed = await waitUntilOrCompletion(batch.dueAt, batch.completion, signal)
+      if (completed) return completed
+      if (signal?.aborted) throw signal.reason
+      if (Date.now() < batch.dueAt || batch.claimed) continue
+      batch.claimed = true
+      if (this.batches.get(batch.key) === batch) this.batches.delete(batch.key)
+      const events = [...batch.events.values()]
+      try {
+        await deliver(this.batchDelivery(batch.kind, events))
+        for (const event of events) this.remember(event.signature)
+        batch.resolve({})
+      } catch (error) {
+        batch.reject(error)
+      }
+    }
+    return await batch.completion
+  }
+
+  private suppressSupersededBatches(target: string, currentHeadSha: string): void {
+    const prefix = `ci-success:${target}:`
+    const currentKey = `${prefix}${currentHeadSha}`
+    for (const [key, batch] of this.batches) {
+      if (batch.kind !== "ci-success" || !key.startsWith(prefix) || key === currentKey || batch.claimed) continue
+      batch.claimed = true
+      this.batches.delete(key)
+      for (const event of batch.events.values()) this.remember(event.signature)
+      batch.resolve({ suppressed: "stale check batch for superseded head" })
+    }
+  }
+
+  private batchDelivery(kind: PendingKind, events: PendingEvent[]): CoalescedDelivery {
+    if (kind === "review") {
+      const commentReviewIds = new Set(events.flatMap((event) => {
+        const reviewId = positiveInteger(object(event.metadata.detail)?.reviewId)
+        return reviewId ? [reviewId] : []
       }))
       const filtered = events.filter((event) => {
-        const detail = object(event.metadata.detail)!
-        const kind = text(detail, "kind")
-        if (kind === "check_suite" && checkRunsByApp.has(text(detail, "appSlug") ?? "")) return false
-        if (kind === "workflow_run" && checkRunsByApp.has("github-actions")) return false
-        return true
+        const detail = object(event.metadata.detail)
+        return text(detail ?? {}, "kind") !== "pull_request_review"
+          || !commentReviewIds.has(positiveInteger(detail?.id) ?? -1)
       })
-      if (filtered.length) {
-        const delivery = { content: batchPrompt(filtered, "current-head CI success summary"), urgent: false, reason: "CI success batch" }
-        deliveries.push(delivery)
-        this.deliveryPending.set(delivery, ready.filter(([, event]) => events.includes(event)))
-      }
+      return { content: batchPrompt(filtered, "review batch"), urgent: false, reason: "review batch" }
     }
-    return deliveries
-  }
 
-  acknowledge(delivery: CoalescedDelivery): void {
-    for (const signature of this.deliverySignatures.get(delivery) ?? []) this.remember(signature)
-    for (const [, event] of this.deliveryPending.get(delivery) ?? []) {
-      this.remember(semanticSignature(event.metadata))
-    }
-  }
-
-  restore(delivery: CoalescedDelivery): void {
-    for (const [key, event] of this.deliveryPending.get(delivery) ?? []) {
-      if (!this.pending.has(key)) this.pending.set(key, event)
+    const checkRunsByApp = new Set(events.flatMap((event) => {
+      const detail = object(event.metadata.detail)
+      return text(detail ?? {}, "kind") === "check_run" ? [text(detail!, "appSlug") ?? ""] : []
+    }))
+    const filtered = events.filter((event) => {
+      const detail = object(event.metadata.detail)!
+      const eventKind = text(detail, "kind")
+      if (eventKind === "check_suite" && checkRunsByApp.has(text(detail, "appSlug") ?? "")) return false
+      if (eventKind === "workflow_run" && checkRunsByApp.has("github-actions")) return false
+      return true
+    })
+    return {
+      content: batchPrompt(filtered, "current-head CI success summary"),
+      urgent: false,
+      reason: "CI success batch",
     }
   }
 
@@ -786,10 +911,6 @@ export class GitHubEventCoalescer {
     this.seen.add(signature)
     if (this.seen.size > 2_000) this.seen.delete(this.seen.values().next().value!)
   }
-}
-
-export function shouldSteer(delivery: Pick<CoalescedDelivery, "urgent">, state: string): boolean {
-  return delivery.urgent && state !== "idle"
 }
 
 export default async function ampSubscribe(amp: PluginAPI) {
@@ -801,54 +922,51 @@ export default async function ampSubscribe(amp: PluginAPI) {
   const agentLogin = githubIdentity?.exitCode === 0 ? principal(githubIdentity.stdout.trim()) : undefined
   const coalescer = new GitHubEventCoalescer(agentLogin)
   const seen = new Set<string>()
-  const inFlight = new Set<string>()
+  const executions = new Map<string, Promise<void>>()
   const counters = { received: 0, delivered: 0, suppressed: 0, batched: 0 }
   const { url: webhookUrl } = await amp.createWebhook({
     key: "github-pr-events",
     handler: async (event, ctx) => {
       counters.received += 1
-      if (seen.has(event.id) || inFlight.has(event.id)) {
+      if (seen.has(event.id)) {
         counters.suppressed += 1
         ctx.logger.log("GitHub event suppressed", { reason: "exact redelivery", eventId: event.id, ...counters })
         return
       }
-      inFlight.add(event.id)
-      try {
+      const running = executions.get(event.id)
+      if (running) {
+        counters.suppressed += 1
+        ctx.logger.log("GitHub event coalesced", { reason: "concurrent exact redelivery", eventId: event.id, ...counters })
+        return running
+      }
+      const execution = (async () => {
         const payload = JSON.parse(new TextDecoder().decode(event.body)) as unknown
-        const result = coalescer.ingest(payload)
-        if (result.suppressed) {
-          counters.suppressed += 1
-          ctx.logger.log("GitHub event suppressed", { reason: result.suppressed, eventId: event.id, ...counters })
-        }
-        if (result.waitUntil) await Bun.sleep(Math.max(0, result.waitUntil - Date.now()))
-        const deliveries = [...result.deliveries, ...coalescer.flush()]
-        for (const delivery of deliveries) {
-          const state = await ctx.thread.state.get()
-          const steer = shouldSteer(delivery, state)
-          try {
-            await ctx.thread.appendUserMessage(
-              { type: "user-message", content: delivery.content },
-              { steer },
-            )
-          } catch (error) {
-            coalescer.restore(delivery)
-            throw error
-          }
-          coalescer.acknowledge(delivery)
+        const result = await coalescer.handle(payload, async (delivery) => {
+          await ctx.thread.appendUserMessage(
+            { type: "user-message", content: delivery.content },
+            { steer: delivery.urgent },
+          )
           counters.delivered += 1
           if (delivery.reason.endsWith("batch")) counters.batched += 1
           ctx.logger.log("GitHub event delivered", {
             reason: delivery.reason,
-            threadState: state,
-            steer,
+            steer: delivery.urgent,
             eventId: event.id,
             ...counters,
           })
+        }, ctx.signal)
+        if (result.suppressed) {
+          counters.suppressed += 1
+          ctx.logger.log("GitHub event suppressed", { reason: result.suppressed, eventId: event.id, ...counters })
         }
         seen.add(event.id)
         if (seen.size > 2_000) seen.delete(seen.values().next().value!)
+      })()
+      executions.set(event.id, execution)
+      try {
+        await execution
       } finally {
-        inFlight.delete(event.id)
+        if (executions.get(event.id) === execution) executions.delete(event.id)
       }
     },
   })

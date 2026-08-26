@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import {
+import type { PluginAPI } from "@ampcode/plugin"
+import ampSubscribe, {
   bridgeConfiguration,
   eventPrompt,
   GitHubEventCoalescer,
   pullRequestFromShellResult,
-  shouldSteer,
 } from "../plugin/github-relay"
 
 const success = (output: unknown) => ({
@@ -92,6 +92,66 @@ const baseEvent = {
   sender: "reviewer",
   occurredAt: "2026-08-23T10:20:30.000Z",
   behavior: "investigate",
+}
+
+type CapturedWebhookHandler = (event: {
+  id: string
+  body: Uint8Array
+}, context: {
+  thread: {
+    appendUserMessage: (message: unknown, options: { steer?: boolean }) => Promise<void>
+    state: { get: () => Promise<string> }
+  }
+  logger: { log: (...values: unknown[]) => void }
+  signal: AbortSignal
+}) => void | Promise<void>
+
+async function captureWebhookHandler(): Promise<CapturedWebhookHandler> {
+  let handler: CapturedWebhookHandler | undefined
+  const previousOrb = process.env.AMP_ORB
+  process.env.AMP_ORB = "1"
+  try {
+    await ampSubscribe({
+      $: async () => ({ exitCode: 0, stdout: "amp-user\n", stderr: "" }),
+      logger: { log: () => undefined },
+      createWebhook: async (options: { handler: CapturedWebhookHandler }) => {
+        handler = options.handler
+        return { url: "https://hooks.example.test/github" }
+      },
+      on: () => undefined,
+      registerTool: () => undefined,
+      helpers: { shellCommandFromToolCall: () => null },
+    } as unknown as PluginAPI)
+  } finally {
+    if (previousOrb === undefined) delete process.env.AMP_ORB
+    else process.env.AMP_ORB = previousOrb
+  }
+  if (!handler) throw new Error("Webhook handler was not registered")
+  return handler
+}
+
+function webhookInvocation(
+  id: string,
+  appendUserMessage: CapturedWebhookHandler extends (event: infer _, context: infer C) => unknown
+    ? C extends { thread: { appendUserMessage: infer A } } ? A : never
+    : never,
+  stateGet: () => Promise<string> = async () => "running",
+) {
+  const routineEvent = {
+    ...baseEvent,
+    githubEvent: "pull_request",
+    event: "pull_requests",
+    action: "opened",
+    detail: { kind: "pull_request", state: "open", headSha: "a".repeat(40) },
+  }
+  return {
+    event: { id, body: new TextEncoder().encode(JSON.stringify(routineEvent)) },
+    context: {
+      thread: { appendUserMessage, state: { get: stateGet } },
+      logger: { log: () => undefined },
+      signal: new AbortController().signal,
+    },
+  }
 }
 
 describe("eventPrompt", () => {
@@ -311,6 +371,46 @@ describe("eventPrompt", () => {
   })
 })
 
+describe("webhook handler delivery", () => {
+  test("appends without waiting for thread-state telemetry", async () => {
+    const handler = await captureWebhookHandler()
+    let stateReads = 0
+    let steer: boolean | undefined
+    const invocation = webhookInvocation(
+      "amp-event-1",
+      async (_message, options) => { steer = options.steer },
+      () => {
+        stateReads += 1
+        return new Promise<string>(() => undefined)
+      },
+    )
+    const completed = await Promise.race([
+      Promise.resolve(handler(invocation.event, invocation.context)).then(() => true),
+      Bun.sleep(50).then(() => false),
+    ])
+    expect(completed).toBe(true)
+    expect(stateReads).toBe(0)
+    expect(steer).toBe(false)
+  })
+
+  test("concurrent exact redeliveries share append failure", async () => {
+    const handler = await captureWebhookHandler()
+    let appendCalls = 0
+    let rejectAppend!: (error: Error) => void
+    const invocation = webhookInvocation("amp-event-2", async () => {
+      appendCalls += 1
+      return new Promise<void>((_resolve, reject) => { rejectAppend = reject })
+    })
+    const first = Promise.resolve(handler(invocation.event, invocation.context))
+    const duplicate = Promise.resolve(handler(invocation.event, invocation.context))
+    await Bun.sleep(0)
+    expect(appendCalls).toBe(1)
+    rejectAppend(new Error("append failed"))
+    const results = await Promise.allSettled([first, duplicate])
+    expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"])
+  })
+})
+
 function checkEvent(
   kind: "check_run" | "check_suite" | "workflow_run",
   id: number,
@@ -337,8 +437,10 @@ function checkEvent(
 }
 
 describe("GitHubEventCoalescer", () => {
-  test("suppresses lifecycle noise, semantic duplicates, stale SHAs, and PR edits", () => {
-    const coalescer = new GitHubEventCoalescer()
+  test("suppresses lifecycle noise, semantic duplicates, stale SHAs, and PR edits", async () => {
+    const coalescer = new GitHubEventCoalescer(undefined, 5, 5, 50)
+    const deliveries: Array<{ content: string; urgent: boolean; reason: string }> = []
+    const deliver = async (delivery: (typeof deliveries)[number]) => { deliveries.push(delivery) }
     const headUpdate = {
       ...baseEvent,
       deliveryId: "delivery-head",
@@ -352,50 +454,50 @@ describe("GitHubEventCoalescer", () => {
         headSha: "a".repeat(40),
       },
     }
-    expect(coalescer.ingest(headUpdate, 0).deliveries).toHaveLength(1)
-    expect(coalescer.ingest(checkEvent("check_run", 1, "queued", null), 0).suppressed)
+    await coalescer.handle(headUpdate, deliver)
+    expect(deliveries).toHaveLength(1)
+    expect((await coalescer.handle(checkEvent("check_run", 1, "queued", null), deliver)).suppressed)
       .toBe("non-terminal check lifecycle")
-    expect(coalescer.ingest(checkEvent("check_run", 2, "completed", "success", {
+    expect((await coalescer.handle(checkEvent("check_run", 2, "completed", "success", {
       headSha: "c".repeat(40),
-    }), 0).suppressed).toBe("stale check for superseded head")
+    }), deliver)).suppressed).toBe("stale check for superseded head")
 
     const failure = checkEvent("check_run", 3, "completed", "failure")
-    const failureResult = coalescer.ingest(failure, 0)
-    expect(failureResult.deliveries).toEqual([
-      expect.objectContaining({ urgent: true, reason: "terminal check failure" }),
-    ])
-    coalescer.acknowledge(failureResult.deliveries[0]!)
-    expect(coalescer.ingest({ ...failure, deliveryId: "different-delivery" }, 1).suppressed)
+    await coalescer.handle(failure, deliver)
+    expect(deliveries.at(-1)).toMatchObject({ urgent: true, reason: "terminal check failure" })
+    expect((await coalescer.handle({ ...failure, deliveryId: "different-delivery" }, deliver)).suppressed)
       .toBe("semantic duplicate")
-    expect(coalescer.ingest({
+    expect((await coalescer.handle({
       ...baseEvent,
       deliveryId: "delivery-edit",
       githubEvent: "pull_request",
       event: "pull_requests",
       action: "edited",
       detail: { kind: "pull_request", headSha: "a".repeat(40), changedFields: ["body"] },
-    }).suppressed).toBe("low-value pull request edit")
-    expect(coalescer.ingest({
+    }, deliver)).suppressed).toBe("low-value pull request edit")
+    const beforeBaseEdit = deliveries.length
+    await coalescer.handle({
       ...baseEvent,
       deliveryId: "delivery-base-edit",
       githubEvent: "pull_request",
       event: "pull_requests",
       action: "edited",
       detail: { kind: "pull_request", headSha: "a".repeat(40), changedFields: ["base"] },
-    }).deliveries).toHaveLength(1)
+    }, deliver)
+    expect(deliveries).toHaveLength(beforeBaseEdit + 1)
   })
 
-  test("debounces current-head successes and removes suite/workflow overlap", () => {
-    const coalescer = new GitHubEventCoalescer(undefined, 1_000, 3_000)
+  test("debounces current-head successes and removes suite/workflow overlap", async () => {
+    const coalescer = new GitHubEventCoalescer(undefined, 5, 10, 50)
+    const deliveries: Array<{ content: string; urgent: boolean; reason: string }> = []
+    const deliver = async (delivery: (typeof deliveries)[number]) => { deliveries.push(delivery) }
     const successes = [
       checkEvent("check_suite", 10, "completed", "success", { appSlug: "github-actions" }),
       checkEvent("workflow_run", 11, "completed", "success"),
       checkEvent("check_run", 12, "completed", "success", { appSlug: "github-actions" }),
       checkEvent("check_run", 13, "completed", "success", { appSlug: "github-actions" }),
     ]
-    for (const event of successes) expect(coalescer.ingest(event, 0).waitUntil).toBe(3_000)
-    expect(coalescer.flush(2_999)).toEqual([])
-    const deliveries = coalescer.flush(3_000)
+    await Promise.all(successes.map((event) => coalescer.handle(event, deliver)))
     expect(deliveries).toHaveLength(1)
     expect(deliveries[0]).toMatchObject({ urgent: false, reason: "CI success batch" })
     expect(deliveries[0]?.content).toContain("Check run 12: success")
@@ -404,8 +506,25 @@ describe("GitHubEventCoalescer", () => {
     expect(deliveries[0]?.content).not.toContain("Workflow run 11")
   })
 
-  test("batches review comments with their submission and drops agent-authored replies", () => {
-    const coalescer = new GitHubEventCoalescer("amp-user", 1_000)
+  test("coalesces duplicate terminal suites with different delivery IDs", async () => {
+    const coalescer = new GitHubEventCoalescer(undefined, 5, 10, 50)
+    const deliveries: string[] = []
+    const suite = checkEvent("check_suite", 20, "completed", "success", { appSlug: "socket-security" })
+    await Promise.all([
+      coalescer.handle(suite, async (delivery) => { deliveries.push(delivery.content) }),
+      coalescer.handle(
+        { ...suite, deliveryId: "duplicate-suite-delivery" },
+        async (delivery) => { deliveries.push(delivery.content) },
+      ),
+    ])
+    expect(deliveries).toHaveLength(1)
+    expect(deliveries[0]).toContain("Check suite 20: success")
+  })
+
+  test("batches review comments with their submission and drops agent-authored replies", async () => {
+    const coalescer = new GitHubEventCoalescer("amp-user", 10, 10, 50)
+    const deliveries: Array<{ content: string; urgent: boolean; reason: string }> = []
+    const deliver = async (delivery: (typeof deliveries)[number]) => { deliveries.push(delivery) }
     const review = {
       ...baseEvent,
       detail: {
@@ -431,33 +550,41 @@ describe("GitHubEventCoalescer", () => {
         line: 12,
       },
     }
-    coalescer.ingest(review, 0)
-    coalescer.ingest(comment, 100)
-    expect(coalescer.flush(1_000)).toEqual([])
-    const deliveries = coalescer.flush(1_100)
+    const reviewHandle = coalescer.handle(review, deliver)
+    await Bun.sleep(5)
+    const commentHandle = coalescer.handle(comment, deliver)
+    await Promise.all([reviewHandle, commentHandle])
     expect(deliveries).toHaveLength(1)
     expect(deliveries[0]?.content).toContain("Review comment 201")
     expect(deliveries[0]?.content).not.toContain("Review 200:")
 
-    expect(coalescer.ingest({
+    expect((await coalescer.handle({
       ...comment,
       deliveryId: "delivery-agent-reply",
       sender: "amp-user",
       detail: { ...comment.detail, id: 202, inReplyToId: 201, author: "amp-user" },
-    }).suppressed).toBe("agent-authored feedback loop")
+    }, deliver)).suppressed).toBe("agent-authored feedback loop")
   })
 
-  test("restores a claimed batch when appending it fails", () => {
-    const coalescer = new GitHubEventCoalescer(undefined, 1_000, 3_000)
-    coalescer.ingest(checkEvent("check_run", 250, "completed", "success"), 0)
-    const [claimed] = coalescer.flush(3_000)
-    expect(claimed).toBeDefined()
-    coalescer.restore(claimed!)
-    expect(coalescer.flush(3_000)).toHaveLength(1)
+  test("rejects every contributor when appending a batch fails and permits retry", async () => {
+    const coalescer = new GitHubEventCoalescer(undefined, 5, 10, 50)
+    const first = checkEvent("check_run", 250, "completed", "success")
+    const second = checkEvent("check_run", 251, "completed", "success")
+    const failing = async () => { throw new Error("append failed") }
+    const results = await Promise.allSettled([
+      coalescer.handle(first, failing),
+      coalescer.handle(second, failing),
+    ])
+    expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"])
+
+    const deliveries: string[] = []
+    await coalescer.handle(first, async (delivery) => { deliveries.push(delivery.content) })
+    expect(deliveries).toHaveLength(1)
   })
 
-  test("does not let an out-of-order synchronize event regress the current head", () => {
-    const coalescer = new GitHubEventCoalescer()
+  test("does not let an out-of-order synchronize event regress the current head", async () => {
+    const coalescer = new GitHubEventCoalescer(undefined, 5, 5, 50)
+    const deliver = async () => {}
     const update = (deliveryId: string, beforeSha: string, afterSha: string) => ({
       ...baseEvent,
       deliveryId,
@@ -466,18 +593,59 @@ describe("GitHubEventCoalescer", () => {
       action: "synchronize",
       detail: { kind: "pull_request", beforeSha, afterSha, headSha: afterSha },
     })
-    coalescer.ingest(update("new", "a".repeat(40), "b".repeat(40)))
-    expect(coalescer.ingest(update("stale", "0".repeat(40), "a".repeat(40))).suppressed)
+    await coalescer.handle(update("new", "a".repeat(40), "b".repeat(40)), deliver)
+    expect((await coalescer.handle(update("stale", "0".repeat(40), "a".repeat(40)), deliver)).suppressed)
       .toBe("stale pull request update")
-    expect(coalescer.ingest(checkEvent("check_run", 300, "completed", "success", {
+    expect((await coalescer.handle(checkEvent("check_run", 300, "completed", "success", {
       headSha: "a".repeat(40),
-    })).suppressed).toBe("stale check for superseded head")
+    }), deliver)).suppressed).toBe("stale check for superseded head")
   })
-})
 
-test("only urgent events steer active work", () => {
-  expect(shouldSteer({ urgent: false }, "running")).toBe(false)
-  expect(shouldSteer({ urgent: true }, "running")).toBe(true)
-  expect(shouldSteer({ urgent: true }, "awaiting-approval")).toBe(true)
-  expect(shouldSteer({ urgent: true }, "idle")).toBe(false)
+  test("settles a pending success batch as suppressed when the head advances", async () => {
+    const coalescer = new GitHubEventCoalescer(undefined, 5, 30, 50)
+    const deliveries: string[] = []
+    const deliver = async (delivery: { content: string }) => { deliveries.push(delivery.content) }
+    const pending = coalescer.handle(checkEvent("check_run", 350, "completed", "success"), deliver)
+    await Bun.sleep(5)
+    const update = {
+      ...baseEvent,
+      deliveryId: "new-head",
+      githubEvent: "pull_request",
+      event: "commits",
+      action: "synchronize",
+      detail: {
+        kind: "pull_request",
+        beforeSha: "a".repeat(40),
+        afterSha: "b".repeat(40),
+        headSha: "b".repeat(40),
+      },
+    }
+    await coalescer.handle(update, deliver)
+    expect((await pending).suppressed).toBe("stale check batch for superseded head")
+    expect(deliveries).toHaveLength(1)
+    expect(deliveries[0]).toContain("Pull request updated")
+  })
+
+  test("suppresses old-head review cleanup", async () => {
+    const coalescer = new GitHubEventCoalescer(undefined, 5, 5, 50)
+    const deliver = async () => { throw new Error("stale review should not deliver") }
+    const staleReview = (action: "edited" | "dismissed", deliveryId: string) => ({
+      ...baseEvent,
+      deliveryId,
+      action,
+      pullRequest: { ...baseEvent.pullRequest, headSha: "b".repeat(40) },
+      detail: {
+        kind: "pull_request_review",
+        id: 400,
+        url: "https://github.com/lox/project/pull/17#pullrequestreview-400",
+        state: "dismissed",
+        author: "reviewer",
+        commitSha: "a".repeat(40),
+      },
+    })
+    expect((await coalescer.handle(staleReview("edited", "review-edited"), deliver)).suppressed)
+      .toBe("stale review for superseded head")
+    expect((await coalescer.handle(staleReview("dismissed", "review-dismissed"), deliver)).suppressed)
+      .toBe("stale review for superseded head")
+  })
 })

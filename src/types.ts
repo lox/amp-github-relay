@@ -135,6 +135,6 @@ interface RoutedEventBase {
 }
 
 export type RoutedEvent = RoutedEventBase & (
-  | { targetType: "pull_request"; pullRequest: { number: number; url: string } }
+  | { targetType: "pull_request"; pullRequest: { number: number; url: string; headSha?: string } }
   | { targetType: "branch"; branch: { name: string; url: string } }
 )

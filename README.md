@@ -89,9 +89,13 @@ The bridge drops queued and in-progress check lifecycle events before they consu
 capacity. The plugin immediately queues terminal failures, but routine events do not steer active
 work. It debounces successful checks into one current-head summary, removes check-run/check-suite/
 workflow-run overlap, batches review submissions with their line comments, ignores agent-authored
-comment replies, and suppresses stale-SHA checks and pull request body edits. Plugin logs include
-delivery reasons, thread state, steering decisions, and cumulative received/delivered/suppressed/
+comment replies, and suppresses stale-SHA checks/reviews and pull request body/title edits. Plugin
+logs include delivery reasons, steering decisions, and cumulative received/delivered/suppressed/
 batched counts.
+
+GitHub delivery IDs are deduplicated durably by the bridge. Thread-side batching and semantic
+deduplication are process-local; as with any at-least-once handler, a process loss immediately after
+appending a message can still produce a duplicate when Amp retries the event.
 
 ## Self-hosting
 

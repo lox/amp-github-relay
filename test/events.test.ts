@@ -90,7 +90,7 @@ describe("normalizeGitHubEvent", () => {
     const event = normalizeGitHubEvent("pull_request_review", "delivery-review", {
       action: "submitted",
       repository,
-      pull_request: pullRequest,
+      pull_request: { ...pullRequest, head: { sha: afterSha } },
       sender: { login: "webhook-sender" },
       review: {
         id: 91,
@@ -108,6 +108,7 @@ describe("normalizeGitHubEvent", () => {
       author: "review-author",
       commitSha: headSha,
     })
+    expect(event?.targetType === "pull_request" && event.pullRequest.headSha).toBe(afterSha)
   })
 
   test("includes review comment location and reply metadata", () => {

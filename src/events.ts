@@ -322,11 +322,16 @@ export function normalizeGitHubEvent(
     const pullRequestNumber = number(pullRequest.number)
     const event = classify(eventName, action, pullRequest)
     if (pullRequestNumber === null || !event) return []
+    const pullRequestHeadSha = sha(object(pullRequest.head)?.sha)
     return [{
       ...common,
       event,
       targetType: "pull_request" as const,
-      pullRequest: { number: pullRequestNumber, url: `https://github.com/${fullName}/pull/${pullRequestNumber}` },
+      pullRequest: {
+        number: pullRequestNumber,
+        url: `https://github.com/${fullName}/pull/${pullRequestNumber}`,
+        ...(pullRequestHeadSha ? { headSha: pullRequestHeadSha } : {}),
+      },
     }]
   })
   const branch = branchFor(eventName, root, repositoryId)
