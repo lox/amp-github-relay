@@ -569,7 +569,8 @@ function targetKey(metadata: JsonObject): string {
   const repository = object(metadata.repository)!
   const pullRequest = object(metadata.pullRequest)
   const branch = object(metadata.branch)
-  return `${text(repository, "fullName")}:${positiveInteger(pullRequest?.number) ?? text(branch ?? {}, "name")}`
+  const targetType = text(metadata, "targetType")!
+  return `${text(repository, "fullName")}:${targetType}:${positiveInteger(pullRequest?.number) ?? text(branch ?? {}, "name")}`
 }
 
 function behaviorInstruction(values: unknown[]): string {
@@ -651,15 +652,15 @@ function waitUntilOrCompletion(
  */
 export class GitHubEventCoalescer {
   private readonly currentHeads = new Map<string, string>()
-  private readonly seen = new Set<string>()
+  private readonly seen = new Map<string, number>()
   private readonly pendingSignatures = new Map<string, Promise<unknown>>()
   private readonly batches = new Map<string, PendingBatch>()
 
   constructor(
-    private readonly agentLogin?: string,
     private readonly reviewDelayMs = 1_000,
     private readonly successDelayMs = 3_000,
     private readonly maximumBatchAgeMs = 20_000,
+    private readonly semanticDeduplicationMs = 60_000,
   ) {}
 
   async handle(
@@ -673,12 +674,15 @@ export class GitHubEventCoalescer {
     const target = targetKey(metadata)
     const githubEvent = text(metadata, "githubEvent")!
     const action = text(metadata, "action")!
-    const sender = text(metadata, "sender")
     const detail = object(metadata.detail)
     const detailKind = detail && text(detail, "kind")
     const detailId = detail && positiveInteger(detail.id)
     const signature = semanticSignature(metadata)
-    if (this.seen.has(signature)) return { suppressed: "semantic duplicate" }
+    const seenAt = this.seen.get(signature)
+    if (seenAt !== undefined && Date.now() - seenAt <= this.semanticDeduplicationMs) {
+      return { suppressed: "semantic duplicate" }
+    }
+    if (seenAt !== undefined) this.seen.delete(signature)
     const pending = this.pendingSignatures.get(signature)
     if (pending) {
       await pending
@@ -693,12 +697,6 @@ export class GitHubEventCoalescer {
     if (githubEvent === "pull_request" && action === "edited" && Array.isArray(changedFields)
       && changedFields.length > 0 && changedFields.every((field) => field === "body" || field === "title")) {
       return suppress("low-value pull request edit")
-    }
-
-    const selfAuthored = !!this.agentLogin && sender?.toLowerCase() === this.agentLogin.toLowerCase()
-    if (selfAuthored && (githubEvent === "pull_request_review"
-      || githubEvent === "pull_request_review_comment" || githubEvent === "issue_comment")) {
-      return suppress("agent-authored feedback loop")
     }
 
     if (detailKind === "pull_request") {
@@ -853,7 +851,8 @@ export class GitHubEventCoalescer {
       if (this.batches.get(batch.key) === batch) this.batches.delete(batch.key)
       const events = [...batch.events.values()]
       try {
-        await deliver(this.batchDelivery(batch.kind, events))
+        const delivery = this.batchDelivery(batch.kind, events)
+        await deliver(delivery)
         for (const event of events) this.remember(event.signature)
         batch.resolve({})
       } catch (error) {
@@ -883,8 +882,10 @@ export class GitHubEventCoalescer {
       }))
       const filtered = events.filter((event) => {
         const detail = object(event.metadata.detail)
-        return text(detail ?? {}, "kind") !== "pull_request_review"
-          || !commentReviewIds.has(positiveInteger(detail?.id) ?? -1)
+        const eventKind = text(detail ?? {}, "kind")
+        return eventKind !== "pull_request_review"
+          || text(detail!, "state") !== "commented"
+          || !commentReviewIds.has(positiveInteger(detail!.id) ?? -1)
       })
       return { content: batchPrompt(filtered, "review batch"), urgent: false, reason: "review batch" }
     }
@@ -908,8 +909,8 @@ export class GitHubEventCoalescer {
   }
 
   private remember(signature: string): void {
-    this.seen.add(signature)
-    if (this.seen.size > 2_000) this.seen.delete(this.seen.values().next().value!)
+    this.seen.set(signature, Date.now())
+    if (this.seen.size > 2_000) this.seen.delete(this.seen.keys().next().value!)
   }
 }
 
@@ -918,9 +919,7 @@ export default async function ampSubscribe(amp: PluginAPI) {
     amp.logger.log("amp-subscribe is disabled outside an Amp-managed orb")
     return
   }
-  const githubIdentity = await amp.$`gh api user --jq .login`.catch(() => null)
-  const agentLogin = githubIdentity?.exitCode === 0 ? principal(githubIdentity.stdout.trim()) : undefined
-  const coalescer = new GitHubEventCoalescer(agentLogin)
+  const coalescer = new GitHubEventCoalescer()
   const seen = new Set<string>()
   const executions = new Map<string, Promise<void>>()
   const counters = { received: 0, delivered: 0, suppressed: 0, batched: 0 }

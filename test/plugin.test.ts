@@ -438,7 +438,7 @@ function checkEvent(
 
 describe("GitHubEventCoalescer", () => {
   test("suppresses lifecycle noise, semantic duplicates, stale SHAs, and PR edits", async () => {
-    const coalescer = new GitHubEventCoalescer(undefined, 5, 5, 50)
+    const coalescer = new GitHubEventCoalescer(5, 5, 50)
     const deliveries: Array<{ content: string; urgent: boolean; reason: string }> = []
     const deliver = async (delivery: (typeof deliveries)[number]) => { deliveries.push(delivery) }
     const headUpdate = {
@@ -488,7 +488,7 @@ describe("GitHubEventCoalescer", () => {
   })
 
   test("debounces current-head successes and removes suite/workflow overlap", async () => {
-    const coalescer = new GitHubEventCoalescer(undefined, 5, 10, 50)
+    const coalescer = new GitHubEventCoalescer(5, 10, 50)
     const deliveries: Array<{ content: string; urgent: boolean; reason: string }> = []
     const deliver = async (delivery: (typeof deliveries)[number]) => { deliveries.push(delivery) }
     const successes = [
@@ -507,7 +507,7 @@ describe("GitHubEventCoalescer", () => {
   })
 
   test("coalesces duplicate terminal suites with different delivery IDs", async () => {
-    const coalescer = new GitHubEventCoalescer(undefined, 5, 10, 50)
+    const coalescer = new GitHubEventCoalescer(5, 10, 50)
     const deliveries: string[] = []
     const suite = checkEvent("check_suite", 20, "completed", "success", { appSlug: "socket-security" })
     await Promise.all([
@@ -521,8 +521,38 @@ describe("GitHubEventCoalescer", () => {
     expect(deliveries[0]).toContain("Check suite 20: success")
   })
 
-  test("batches review comments with their submission and drops agent-authored replies", async () => {
-    const coalescer = new GitHubEventCoalescer("amp-user", 10, 10, 50)
+  test("isolates a numeric branch name from the same-numbered pull request", async () => {
+    const coalescer = new GitHubEventCoalescer(5, 5, 50)
+    const deliveries: string[] = []
+    const deliver = async (delivery: { content: string }) => { deliveries.push(delivery.content) }
+    await coalescer.handle({
+      ...baseEvent,
+      deliveryId: "pr-17-head",
+      githubEvent: "pull_request",
+      event: "commits",
+      action: "synchronize",
+      pullRequest: { ...baseEvent.pullRequest, headSha: "b".repeat(40) },
+      detail: {
+        kind: "pull_request",
+        beforeSha: "a".repeat(40),
+        afterSha: "b".repeat(40),
+        headSha: "b".repeat(40),
+      },
+    }, deliver)
+
+    const branchCheck = {
+      ...checkEvent("check_run", 21, "completed", "success"),
+      targetType: "branch",
+      pullRequest: undefined,
+      branch: { name: "17", url: "https://github.com/lox/project/tree/17" },
+    }
+    await coalescer.handle(branchCheck, deliver)
+    expect(deliveries).toHaveLength(2)
+    expect(deliveries[1]).toContain("Check run 21: success")
+  })
+
+  test("batches review comments with their submission and queues agent-authored replies once", async () => {
+    const coalescer = new GitHubEventCoalescer(10, 10, 50)
     const deliveries: Array<{ content: string; urgent: boolean; reason: string }> = []
     const deliver = async (delivery: (typeof deliveries)[number]) => { deliveries.push(delivery) }
     const review = {
@@ -558,16 +588,110 @@ describe("GitHubEventCoalescer", () => {
     expect(deliveries[0]?.content).toContain("Review comment 201")
     expect(deliveries[0]?.content).not.toContain("Review 200:")
 
-    expect((await coalescer.handle({
+    await coalescer.handle({
       ...comment,
       deliveryId: "delivery-agent-reply",
       sender: "amp-user",
       detail: { ...comment.detail, id: 202, inReplyToId: 201, author: "amp-user" },
-    }, deliver)).suppressed).toBe("agent-authored feedback loop")
+    }, deliver)
+    expect(deliveries).toHaveLength(2)
+    expect(deliveries[1]?.content).toContain("Review comment 202")
+
+    const agentReview = {
+      ...review,
+      deliveryId: "delivery-agent-review",
+      sender: "amp-user",
+      detail: { ...review.detail, id: 204, author: "amp-user" },
+    }
+    const agentReply = {
+      ...comment,
+      deliveryId: "delivery-agent-review-reply",
+      sender: "amp-user",
+      detail: { ...comment.detail, id: 205, reviewId: 204, inReplyToId: 201, author: "amp-user" },
+    }
+    await Promise.all([
+      coalescer.handle(agentReview, deliver),
+      coalescer.handle(agentReply, deliver),
+    ])
+    expect(deliveries).toHaveLength(3)
+    expect(deliveries[2]?.content).toContain("Review comment 205")
+    expect(deliveries[2]?.content).not.toContain("Review 204:")
+
+    await coalescer.handle({
+      ...comment,
+      deliveryId: "delivery-agent-top-level-comment",
+      sender: "amp-user",
+      detail: { ...comment.detail, id: 203, author: "amp-user" },
+    }, deliver)
+    expect(deliveries).toHaveLength(4)
+    expect(deliveries[3]?.content).toContain("Review comment 203")
+  })
+
+  test("preserves approval verdicts when batching their review comments", async () => {
+    const coalescer = new GitHubEventCoalescer(10, 10, 50)
+    const deliveries: string[] = []
+    const deliver = async (delivery: { content: string }) => { deliveries.push(delivery.content) }
+    const review = (id: number, state: string) => ({
+      ...baseEvent,
+      deliveryId: `delivery-review-${id}`,
+      detail: {
+        kind: "pull_request_review",
+        id,
+        url: `https://github.com/lox/project/pull/17#pullrequestreview-${id}`,
+        state,
+        author: "reviewer",
+      },
+    })
+    const comment = (id: number, reviewId: number) => ({
+      ...baseEvent,
+      deliveryId: `delivery-comment-${id}`,
+      githubEvent: "pull_request_review_comment",
+      event: "review_comments",
+      action: "created",
+      detail: {
+        kind: "pull_request_review_comment",
+        id,
+        reviewId,
+        url: `https://github.com/lox/project/pull/17#discussion_r${id}`,
+        author: "reviewer",
+        line: 12,
+      },
+    })
+    await Promise.all([
+      coalescer.handle(review(210, "approved"), deliver),
+      coalescer.handle(comment(211, 210), deliver),
+      coalescer.handle(review(220, "changes_requested"), deliver),
+      coalescer.handle(comment(221, 220), deliver),
+    ])
+    expect(deliveries).toHaveLength(1)
+    expect(deliveries[0]).toContain("Review 210: approved")
+    expect(deliveries[0]).toContain("Review 220: changes requested")
+    expect(deliveries[0]).toContain("Review comment 211")
+    expect(deliveries[0]).toContain("Review comment 221")
+  })
+
+  test("expires semantic deduplication so recurring transitions remain visible", async () => {
+    const coalescer = new GitHubEventCoalescer(5, 5, 50, 10)
+    const deliveries: string[] = []
+    const deliver = async (delivery: { content: string }) => { deliveries.push(delivery.content) }
+    const reopened = {
+      ...baseEvent,
+      deliveryId: "delivery-reopened-1",
+      githubEvent: "pull_request",
+      event: "pull_requests",
+      action: "reopened",
+      detail: { kind: "pull_request", state: "open", headSha: "a".repeat(40) },
+    }
+    await coalescer.handle(reopened, deliver)
+    expect((await coalescer.handle({ ...reopened, deliveryId: "delivery-reopened-2" }, deliver)).suppressed)
+      .toBe("semantic duplicate")
+    await Bun.sleep(15)
+    await coalescer.handle({ ...reopened, deliveryId: "delivery-reopened-3" }, deliver)
+    expect(deliveries).toHaveLength(2)
   })
 
   test("rejects every contributor when appending a batch fails and permits retry", async () => {
-    const coalescer = new GitHubEventCoalescer(undefined, 5, 10, 50)
+    const coalescer = new GitHubEventCoalescer(5, 10, 50)
     const first = checkEvent("check_run", 250, "completed", "success")
     const second = checkEvent("check_run", 251, "completed", "success")
     const failing = async () => { throw new Error("append failed") }
@@ -583,7 +707,7 @@ describe("GitHubEventCoalescer", () => {
   })
 
   test("does not let an out-of-order synchronize event regress the current head", async () => {
-    const coalescer = new GitHubEventCoalescer(undefined, 5, 5, 50)
+    const coalescer = new GitHubEventCoalescer(5, 5, 50)
     const deliver = async () => {}
     const update = (deliveryId: string, beforeSha: string, afterSha: string) => ({
       ...baseEvent,
@@ -602,7 +726,7 @@ describe("GitHubEventCoalescer", () => {
   })
 
   test("settles a pending success batch as suppressed when the head advances", async () => {
-    const coalescer = new GitHubEventCoalescer(undefined, 5, 30, 50)
+    const coalescer = new GitHubEventCoalescer(5, 30, 50)
     const deliveries: string[] = []
     const deliver = async (delivery: { content: string }) => { deliveries.push(delivery.content) }
     const pending = coalescer.handle(checkEvent("check_run", 350, "completed", "success"), deliver)
@@ -627,7 +751,7 @@ describe("GitHubEventCoalescer", () => {
   })
 
   test("suppresses old-head review cleanup", async () => {
-    const coalescer = new GitHubEventCoalescer(undefined, 5, 5, 50)
+    const coalescer = new GitHubEventCoalescer(5, 5, 50)
     const deliver = async () => { throw new Error("stale review should not deliver") }
     const staleReview = (action: "edited" | "dismissed", deliveryId: string) => ({
       ...baseEvent,
