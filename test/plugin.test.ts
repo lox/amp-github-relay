@@ -458,9 +458,10 @@ describe("GitHubEventCoalescer", () => {
     expect(deliveries).toHaveLength(1)
     expect((await coalescer.handle(checkEvent("check_run", 1, "queued", null), deliver)).suppressed)
       .toBe("non-terminal check lifecycle")
-    expect((await coalescer.handle(checkEvent("check_run", 2, "completed", "success", {
-      headSha: "c".repeat(40),
-    }), deliver)).suppressed).toBe("stale check for superseded head")
+    expect((await coalescer.handle({
+      ...checkEvent("check_run", 2, "completed", "success", { headSha: "c".repeat(40) }),
+      pullRequest: { ...baseEvent.pullRequest, headSha: "a".repeat(40) },
+    }, deliver)).suppressed).toBe("stale check for superseded head")
 
     const failure = checkEvent("check_run", 3, "completed", "failure")
     await coalescer.handle(failure, deliver)
@@ -487,7 +488,7 @@ describe("GitHubEventCoalescer", () => {
     expect(deliveries).toHaveLength(beforeBaseEdit + 1)
   })
 
-  test("debounces current-head successes and removes suite/workflow overlap", async () => {
+  test("debounces current-head successes and removes suite overlap without hiding workflows", async () => {
     const coalescer = new GitHubEventCoalescer(5, 10, 50)
     const deliveries: Array<{ content: string; urgent: boolean; reason: string }> = []
     const deliver = async (delivery: (typeof deliveries)[number]) => { deliveries.push(delivery) }
@@ -503,7 +504,7 @@ describe("GitHubEventCoalescer", () => {
     expect(deliveries[0]?.content).toContain("Check run 12: success")
     expect(deliveries[0]?.content).toContain("Check run 13: success")
     expect(deliveries[0]?.content).not.toContain("Check suite 10")
-    expect(deliveries[0]?.content).not.toContain("Workflow run 11")
+    expect(deliveries[0]?.content).toContain("Workflow run 11: success")
   })
 
   test("coalesces duplicate terminal suites with different delivery IDs", async () => {
@@ -727,6 +728,16 @@ describe("GitHubEventCoalescer", () => {
       ...checkEvent("check_run", 301, "completed", "failure", { headSha: "a".repeat(40) }),
       pullRequest: { ...baseEvent.pullRequest, headSha: "a".repeat(40) },
     }, deliver)).suppressed).toBe("stale check for superseded head")
+
+    let newHeadCheckDelivered = false
+    await coalescer.handle({
+      ...checkEvent("check_run", 302, "completed", "failure", { headSha: "c".repeat(40) }),
+      pullRequest: { ...baseEvent.pullRequest, headSha: "c".repeat(40) },
+    }, async (delivery) => {
+      expect(delivery.urgent).toBe(true)
+      newHeadCheckDelivered = true
+    })
+    expect(newHeadCheckDelivered).toBe(true)
   })
 
   test("settles a pending success batch as suppressed when the head advances", async () => {
@@ -808,9 +819,10 @@ describe("GitHubEventCoalescer", () => {
     expect(deliveries[0]).toContain("Push received")
   })
 
-  test("suppresses old-head review cleanup", async () => {
+  test("preserves review cleanup even when it refers to an older diff", async () => {
     const coalescer = new GitHubEventCoalescer(5, 5, 50)
-    const deliver = async () => { throw new Error("stale review should not deliver") }
+    const deliveries: string[] = []
+    const deliver = async (delivery: { content: string }) => { deliveries.push(delivery.content) }
     const staleReview = (action: "edited" | "dismissed", deliveryId: string) => ({
       ...baseEvent,
       deliveryId,
@@ -825,10 +837,11 @@ describe("GitHubEventCoalescer", () => {
         commitSha: "a".repeat(40),
       },
     })
-    expect((await coalescer.handle(staleReview("edited", "review-edited"), deliver)).suppressed)
-      .toBe("stale review for superseded head")
-    expect((await coalescer.handle(staleReview("dismissed", "review-dismissed"), deliver)).suppressed)
-      .toBe("stale review for superseded head")
+    await coalescer.handle(staleReview("edited", "review-edited"), deliver)
+    await coalescer.handle(staleReview("dismissed", "review-dismissed"), deliver)
+    expect(deliveries).toHaveLength(2)
+    expect(deliveries[0]).toContain("Review edited")
+    expect(deliveries[1]).toContain("Review dismissed")
   })
 
   test("preserves newly submitted review feedback created against an older diff", async () => {

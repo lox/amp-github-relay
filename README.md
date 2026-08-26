@@ -87,10 +87,10 @@ webhook. Amp stores the event and wakes the thread even when its orb is asleep.
 
 The bridge drops queued and in-progress check lifecycle events before they consume durable webhook
 capacity. The plugin immediately queues terminal failures, but routine events do not steer active
-work. It debounces successful checks into one current-head summary, removes check-run/check-suite/
-workflow-run overlap, batches review submissions with their line comments, queues agent-authored
-comment replies without steering active work, and suppresses stale-SHA checks/reviews and pull
-request body/title edits. Plugin
+work. It debounces successful checks into one current-head summary, removes check-run/check-suite
+overlap, keeps workflow summaries that cannot be safely correlated, batches review submissions with
+their line comments, and queues agent-authored comment replies without steering active work. It also
+suppresses stale-SHA checks and pull request body/title edits. Plugin
 logs include delivery reasons, steering decisions, and cumulative received/delivered/suppressed/
 batched counts.
 

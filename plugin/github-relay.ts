@@ -652,6 +652,7 @@ function waitUntilOrCompletion(
  */
 export class GitHubEventCoalescer {
   private readonly currentHeads = new Map<string, string>()
+  private readonly supersededHeads = new Map<string, Set<string>>()
   private readonly seen = new Map<string, number>()
   private readonly pendingSignatures = new Map<string, Promise<unknown>>()
   private readonly batches = new Map<string, PendingBatch>()
@@ -707,8 +708,7 @@ export class GitHubEventCoalescer {
         return suppress("stale pull request update")
       }
       if (action === "synchronize" && afterSha) {
-        this.currentHeads.set(target, afterSha)
-        this.suppressSupersededBatches(target, afterSha)
+        this.advanceHead(target, beforeSha, afterSha)
       }
     }
     if (detailKind === "push") {
@@ -719,26 +719,19 @@ export class GitHubEventCoalescer {
         return suppress("stale branch update")
       }
       if (afterSha) {
-        this.currentHeads.set(target, afterSha)
-        this.suppressSupersededBatches(target, afterSha)
+        this.advanceHead(target, beforeSha, afterSha)
       }
     }
 
     const pullRequest = object(metadata.pullRequest)
-    const targetHeadSha = this.currentHeads.get(target) ?? text(pullRequest ?? {}, "headSha")
-    const detailCommitSha = text(detail ?? {}, "commitSha")
-    const staleReviewCleanup = (detailKind === "pull_request_review"
-      && (action === "edited" || action === "dismissed"))
-      || (detailKind === "pull_request_review_comment" && (action === "edited" || action === "deleted"))
-    if (staleReviewCleanup && targetHeadSha && detailCommitSha && targetHeadSha !== detailCommitSha) {
-      return suppress("stale review for superseded head")
-    }
+    const pullRequestHeadSha = text(pullRequest ?? {}, "headSha")
 
     if (isCheckDetail(detail)) {
       const status = text(detail!, "status")
       const conclusion = text(detail!, "conclusion")
       const headSha = text(detail!, "headSha")
-      if (headSha && targetHeadSha && headSha !== targetHeadSha) {
+      if (headSha && (this.supersededHeads.get(target)?.has(headSha)
+        || (pullRequestHeadSha && headSha !== pullRequestHeadSha))) {
         return suppress("stale check for superseded head")
       }
       if (status !== "completed" || !conclusion) {
@@ -754,7 +747,7 @@ export class GitHubEventCoalescer {
 
       return this.enqueue(
         "ci-success",
-        `${target}:${headSha ?? targetHeadSha ?? "unknown"}`,
+        `${target}:${headSha ?? pullRequestHeadSha ?? this.currentHeads.get(target) ?? "unknown"}`,
         checkUnit(detail!),
         { value, metadata, signature },
         this.successDelayMs,
@@ -888,6 +881,21 @@ export class GitHubEventCoalescer {
     }
   }
 
+  private advanceHead(target: string, beforeSha: string | undefined, afterSha: string): void {
+    if (beforeSha && beforeSha !== afterSha) {
+      let superseded = this.supersededHeads.get(target)
+      if (!superseded) {
+        superseded = new Set()
+        this.supersededHeads.set(target, superseded)
+      }
+      superseded.add(beforeSha)
+      if (superseded.size > 50) superseded.delete(superseded.values().next().value!)
+    }
+    this.supersededHeads.get(target)?.delete(afterSha)
+    this.currentHeads.set(target, afterSha)
+    this.suppressSupersededBatches(target, afterSha)
+  }
+
   private batchDelivery(kind: PendingKind, events: PendingEvent[]): CoalescedDelivery {
     if (kind === "review") {
       const commentReviewIds = new Set(events.flatMap((event) => {
@@ -912,7 +920,6 @@ export class GitHubEventCoalescer {
       const detail = object(event.metadata.detail)!
       const eventKind = text(detail, "kind")
       if (eventKind === "check_suite" && checkRunsByApp.has(text(detail, "appSlug") ?? "")) return false
-      if (eventKind === "workflow_run" && checkRunsByApp.has("github-actions")) return false
       return true
     })
     return {
