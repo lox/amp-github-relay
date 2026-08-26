@@ -750,6 +750,60 @@ describe("GitHubEventCoalescer", () => {
     expect(deliveries[0]).toContain("Pull request updated")
   })
 
+  test("supersedes pending and later stale checks when a branch advances", async () => {
+    const coalescer = new GitHubEventCoalescer(5, 30, 50)
+    const deliveries: string[] = []
+    const deliver = async (delivery: { content: string }) => { deliveries.push(delivery.content) }
+    const onBranch = (event: ReturnType<typeof checkEvent>) => ({
+      ...event,
+      targetType: "branch",
+      pullRequest: undefined,
+      branch: { name: "main", url: "https://github.com/lox/project/tree/main" },
+    })
+    const pending = coalescer.handle(
+      onBranch(checkEvent("check_run", 360, "completed", "success")),
+      deliver,
+    )
+    await Bun.sleep(5)
+    await coalescer.handle({
+      ...baseEvent,
+      deliveryId: "branch-new-head",
+      githubEvent: "push",
+      event: "commits",
+      action: "push",
+      targetType: "branch",
+      pullRequest: undefined,
+      branch: { name: "main", url: "https://github.com/lox/project/tree/main" },
+      detail: {
+        kind: "push",
+        beforeSha: "a".repeat(40),
+        afterSha: "b".repeat(40),
+      },
+    }, deliver)
+    expect((await pending).suppressed).toBe("stale check batch for superseded head")
+    expect((await coalescer.handle({
+      ...baseEvent,
+      deliveryId: "stale-branch-head",
+      githubEvent: "push",
+      event: "commits",
+      action: "push",
+      targetType: "branch",
+      pullRequest: undefined,
+      branch: { name: "main", url: "https://github.com/lox/project/tree/main" },
+      detail: {
+        kind: "push",
+        beforeSha: "0".repeat(40),
+        afterSha: "a".repeat(40),
+      },
+    }, deliver)).suppressed).toBe("stale branch update")
+    expect((await coalescer.handle(
+      onBranch(checkEvent("check_run", 361, "completed", "failure")),
+      deliver,
+    )).suppressed).toBe("stale check for superseded head")
+    expect(deliveries).toHaveLength(1)
+    expect(deliveries[0]).toContain("Push received")
+  })
+
   test("suppresses old-head review cleanup", async () => {
     const coalescer = new GitHubEventCoalescer(5, 5, 50)
     const deliver = async () => { throw new Error("stale review should not deliver") }

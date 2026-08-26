@@ -711,6 +711,18 @@ export class GitHubEventCoalescer {
         this.suppressSupersededBatches(target, afterSha)
       }
     }
+    if (detailKind === "push") {
+      const beforeSha = text(detail!, "beforeSha")
+      const afterSha = text(detail!, "afterSha")
+      const current = this.currentHeads.get(target)
+      if (current && beforeSha && current !== beforeSha && current !== afterSha) {
+        return suppress("stale branch update")
+      }
+      if (afterSha) {
+        this.currentHeads.set(target, afterSha)
+        this.suppressSupersededBatches(target, afterSha)
+      }
+    }
 
     const pullRequest = object(metadata.pullRequest)
     const targetHeadSha = text(pullRequest ?? {}, "headSha") ?? this.currentHeads.get(target)
