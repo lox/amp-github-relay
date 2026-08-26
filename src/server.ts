@@ -8,6 +8,10 @@ function required(name: string): string {
 }
 
 const port = Number(process.env.PORT ?? "3000")
+const feedPollSeconds = Number(process.env.FEED_POLL_INTERVAL_SECONDS ?? "300")
+if (!Number.isFinite(feedPollSeconds) || feedPollSeconds < 30) {
+  throw new Error("FEED_POLL_INTERVAL_SECONDS must be at least 30")
+}
 const values = (name: string) => (process.env[name] ?? "").split(",").map((value) => value.trim()).filter(Boolean)
 const bridge = createSubscriptionBridge({
   databasePath: process.env.DATABASE_PATH ?? "./data/relay.sqlite",
@@ -27,3 +31,9 @@ Bun.serve({
 })
 
 console.log(`amp-subscribe listening on port ${port}`)
+
+const pollFeeds = () => bridge.pollFeeds().then((result) => {
+  if (result.failed > 0) console.error("Feed poll completed with failures", result)
+}).catch((error) => console.error("Feed poll failed", error))
+void pollFeeds()
+setInterval(pollFeeds, feedPollSeconds * 1_000).unref()

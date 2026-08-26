@@ -16,8 +16,8 @@ GitHub: A check failed on acme/widgets#123.
 Amp: The Linux test job failed because...
 ```
 
-GitHub pull requests and branches are supported today. The bridge is designed to support other
-event sources, such as Slack, in the future.
+GitHub pull requests and branches, plus RSS and Atom feeds, are supported today. The bridge is
+designed to support other event sources, such as Slack, in the future.
 
 ## Why use it?
 
@@ -59,6 +59,15 @@ watch. To run your own bridge, see [Self-hosting](#self-hosting).
    Notify me about pushes and CI failures.
    ```
 
+   Or subscribe to a feed:
+
+   ```text
+   Subscribe this thread to https://namespace-status.com/feed.atom and notify me about updates.
+   ```
+
+   Both RSS and Atom feeds are accepted. Existing entries establish the initial baseline; the
+   thread wakes only for entries added or updated after subscription.
+
 Keep the plugin filename `github-relay.ts` when upgrading. Amp includes the plugin identity in its
 durable webhook URLs, so renaming it would disconnect existing subscriptions.
 
@@ -76,14 +85,19 @@ subscriptions.
 ## How it works
 
 ```text
-GitHub App ──webhook──▶ amp-subscribe ──durable webhook──▶ Amp thread
-                              ▲                                │
-                              └──────── subscription ──────────┘
+GitHub App ──webhook──┐
+                     ├──▶ amp-subscribe ──durable webhook──▶ Amp thread
+RSS/Atom ───poll──────┘          ▲                                │
+                                └──────── subscription ──────────┘
 ```
 
 The plugin creates a durable webhook for the current Amp thread and registers what it wants to
 watch. amp-subscribe verifies matching GitHub events and forwards a small event summary to that
 webhook. Amp stores the event and wakes the thread even when its orb is asleep.
+
+For feeds, the bridge polls public HTTPS URLs every five minutes by default. Set
+`FEED_POLL_INTERVAL_SECONDS` to change the interval (minimum 30 seconds). Conditional requests are
+used when feeds provide ETag or Last-Modified headers.
 
 The bridge drops queued and in-progress check lifecycle events before they consume durable webhook
 capacity. The plugin immediately queues terminal failures, but routine events do not steer active
@@ -156,6 +170,10 @@ deduplicated, and outbound delivery is restricted to configured HTTPS hosts.
 amp-subscribe forwards bounded event metadata, not untrusted PR titles, comments, check output,
 commit messages, patches, or filenames. Amp fetches that content through its normal GitHub tools
 when it investigates an event.
+
+Feed downloads are limited to public HTTPS endpoints and 1 MiB. Forwarded feed events contain
+bounded entry metadata but not descriptions or body content; the plugin treats feed titles and
+linked pages as untrusted data.
 
 ## Development
 

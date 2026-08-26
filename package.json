@@ -15,6 +15,7 @@
     "typescript": "latest"
   },
   "dependencies": {
+    "fast-xml-parser": "^5.2.5",
     "jose": "^6.2.10"
   }
 }

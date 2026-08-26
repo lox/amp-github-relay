@@ -119,6 +119,31 @@ export type Subscription = SubscriptionBase & (
   | { targetType: "branch"; branch: string }
 )
 
+export interface FeedSubscription {
+  id: string
+  threadId: string
+  feedUrl: string
+  webhookUrl: string
+  behavior: SubscriptionBehavior
+  etag: string | null
+  lastModified: string | null
+  createdAt: string
+}
+
+export interface FeedEntry {
+  id: string
+  fingerprint: string
+  title: string | null
+  url: string | null
+  publishedAt: string | null
+  updatedAt: string | null
+}
+
+export interface ParsedFeed {
+  title: string | null
+  entries: FeedEntry[]
+}
+
 interface RoutedEventBase {
   schemaVersion: 1
   deliveryId: string
