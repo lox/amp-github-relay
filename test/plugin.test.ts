@@ -50,6 +50,20 @@ describe("pullRequestFromShellResult", () => {
     }))).toEqual({ repository: "lox/project", number: 17 })
   })
 
+  test("returns the PR when a multiline script prepares its body before creating it", () => {
+    expect(pullRequestFromShellResult([
+      "body_file=$(mktemp)",
+      "cat > \"$body_file\" <<'EOF'",
+      "Pull request body",
+      "EOF",
+      "gh pr create --body-file \"$body_file\"",
+      "rm \"$body_file\"",
+    ].join("\n"), success({
+      exitCode: 0,
+      output: "https://github.com/lox/project/pull/17\n",
+    }))).toEqual({ repository: "lox/project", number: 17 })
+  })
+
   test("ignores async, failed, and unsupported shell results", () => {
     expect(pullRequestFromShellResult(null, success({
       exitCode: 0,

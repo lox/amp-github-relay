@@ -120,7 +120,7 @@ export function pullRequestFromShellResult(
   command: string | null,
   event: Pick<ToolResultEvent, "status" | "output">,
 ): { repository: string; number: number } | null {
-  if (event.status !== "done" || !command || !/^\s*gh\s+pr\s+create(?:\s|$)/.test(command)) return null
+  if (event.status !== "done" || !command || !/^\s*gh\s+pr\s+create(?:\s|$)/m.test(command)) return null
   if (typeof event.output !== "object" || event.output === null) return null
   const result = event.output as Record<string, unknown>
   if (result.exitCode !== 0 || typeof result.output !== "string") return null
