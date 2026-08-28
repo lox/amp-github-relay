@@ -1,6 +1,6 @@
 import type { PluginAPI, ToolResultEvent } from "@ampcode/plugin"
 
-// Keep this filename stable: Amp durable webhook identity is scoped to the plugin and thread.
+// Keep subscribe.ts stable: Amp durable webhook identity is scoped to the plugin and thread.
 export const description = "Lets an Amp thread subscribe to GitHub pull requests, branches, and RSS or Atom feeds."
 
 const defaultEvents = [

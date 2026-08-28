@@ -6,7 +6,7 @@ import ampSubscribe, {
   feedPrompt,
   GitHubEventCoalescer,
   pullRequestFromShellResult,
-} from "../plugin/github-relay"
+} from "../plugin/subscribe"
 
 const success = (output: unknown) => ({
   status: "done" as const,

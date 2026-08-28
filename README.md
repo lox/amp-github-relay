@@ -31,9 +31,9 @@ designed to support other event sources, such as Slack, in the future.
 You need a running amp-subscribe bridge and its GitHub App installed on the repositories you want to
 watch. To run your own bridge, see [Self-hosting](#self-hosting).
 
-1. Install [`plugin/github-relay.ts`](plugin/github-relay.ts) as
-   `.amp/plugins/github-relay.ts` for one project or
-   `~/.config/amp/plugins/github-relay.ts` for every project.
+1. Install [`plugin/subscribe.ts`](plugin/subscribe.ts) as
+   `.amp/plugins/subscribe.ts` for one project or
+   `~/.config/amp/plugins/subscribe.ts` for every project.
 2. Configure the plugin with your bridge URL and OIDC audience. These commands make the settings
    available to plugins installed in either location:
 
@@ -68,8 +68,11 @@ watch. To run your own bridge, see [Self-hosting](#self-hosting).
    Both RSS and Atom feeds are accepted. Existing entries establish the initial baseline; the
    thread wakes only for entries added or updated after subscription.
 
-Keep the plugin filename `github-relay.ts` when upgrading. Amp includes the plugin identity in its
+Keep the plugin filename `subscribe.ts` when upgrading. Amp includes the plugin identity in its
 durable webhook URLs, so renaming it would disconnect existing subscriptions.
+
+When migrating from `github-relay.ts`, remove the old plugin and recreate its subscriptions after
+installing `subscribe.ts`.
 
 ### Response modes
 
