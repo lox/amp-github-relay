@@ -25,6 +25,7 @@ Subscribe to these repository events:
 
 - Push, for branch subscriptions
 - Pull requests
+- Issues
 - Pull request reviews
 - Pull request review comments
 - Issue comments

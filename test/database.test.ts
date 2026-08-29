@@ -114,4 +114,85 @@ describe("SubscriptionDatabase", () => {
     expect(rolledForward.list("T-test")).toContainEqual(adopted)
     rolledForward.close()
   })
+
+  test("migrates the branch-capable schema to support repository targets", () => {
+    const directory = mkdtempSync(join(tmpdir(), "amp-subscribe-"))
+    directories.push(directory)
+    const path = join(directory, "relay.sqlite")
+    const previous = new Database(path, { create: true })
+    previous.exec(`
+      CREATE TABLE subscriptions (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        pull_request_number INTEGER,
+        target_type TEXT CHECK(target_type IN ('pull_request', 'branch')),
+        target TEXT,
+        webhook_url TEXT NOT NULL,
+        events TEXT NOT NULL,
+        behavior TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(thread_id, repository, target_type, target),
+        UNIQUE(thread_id, repository, pull_request_number)
+      );
+      CREATE TABLE deliveries (
+        subscription_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        event TEXT NOT NULL,
+        delivered_at TEXT NOT NULL,
+        PRIMARY KEY(subscription_id, delivery_id, event),
+        FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
+      );
+      INSERT INTO subscriptions VALUES
+        ('sub-branch', 'T-test', 'lox/project', NULL, 'branch', 'main',
+          'https://hooks.example.test/branch', '["commits"]', 'notify', '2026-08-23T00:00:00.000Z');
+      INSERT INTO deliveries VALUES
+        ('sub-branch', 'delivery-branch', 'commits', '2026-08-23T00:01:00.000Z');
+    `)
+    previous.close()
+
+    const database = new SubscriptionDatabase(path)
+    expect(database.list("T-test")).toEqual([expect.objectContaining({
+      id: "sub-branch",
+      targetType: "branch",
+      branch: "main",
+    })])
+    expect(database.wasDelivered("sub-branch", "delivery-branch", "commits")).toBe(true)
+    expect(database.upsert({
+      threadId: "T-test",
+      repository: "lox/project",
+      targetType: "repository",
+      webhookUrl: "https://hooks.example.test/repository",
+      events: ["issues"],
+      behavior: "notify",
+    })).toMatchObject({ targetType: "repository", repository: "lox/project" })
+    database.close()
+  })
+
+  test("stores and matches one repository subscription per thread and repository", () => {
+    const database = new SubscriptionDatabase(":memory:")
+    const subscription = database.upsert({
+      threadId: "T-test",
+      repository: "lox/project",
+      targetType: "repository",
+      webhookUrl: "https://hooks.example.test/repository",
+      events: ["pull_requests", "issues"],
+      behavior: "notify",
+    })
+    expect(database.list("T-test")).toEqual([subscription])
+    expect(database.matching("LOX/PROJECT", "repository", "*", "issues")).toEqual([subscription])
+    expect(database.matching("lox/project", "repository", "*", "reviews")).toEqual([])
+
+    const updated = database.upsert({
+      threadId: "T-test",
+      repository: "lox/project",
+      targetType: "repository",
+      webhookUrl: "https://hooks.example.test/updated",
+      events: ["issues"],
+      behavior: "investigate",
+    })
+    expect(updated.id).toBe(subscription.id)
+    expect(database.list("T-test")).toEqual([updated])
+    database.close()
+  })
 })
