@@ -1,4 +1,5 @@
 import type { PluginAPI, ToolResultEvent } from "@ampcode/plugin"
+import { existsSync, rmSync } from "node:fs"
 
 // Keep this filename stable: Amp durable webhook identity is scoped to the plugin and thread.
 export const description = "Lets an Amp thread subscribe to GitHub pull requests, branches, and RSS or Atom feeds."
@@ -117,10 +118,10 @@ async function subscribeToFeed(
 }
 
 export function pullRequestFromShellResult(
-  command: string | null,
+  createExecuted: boolean,
   event: Pick<ToolResultEvent, "status" | "output">,
 ): { repository: string; number: number } | null {
-  if (event.status !== "done" || !command || !shellRunsPullRequestCreate(command)) return null
+  if (event.status !== "done" || !createExecuted) return null
   if (typeof event.output !== "object" || event.output === null) return null
   const result = event.output as Record<string, unknown>
   if (result.exitCode !== 0 || typeof result.output !== "string") return null
@@ -137,54 +138,8 @@ export function pullRequestFromShellResult(
   return targets.size === 1 ? [...targets.values()][0] : null
 }
 
-function shellRunsPullRequestCreate(command: string): boolean {
-  const heredocs: Array<{ delimiter: string; stripTabs: boolean }> = []
-  let quote: "single" | "double" | null = null
-  for (const line of command.split("\n")) {
-    const heredoc = heredocs[0]
-    if (heredoc) {
-      const candidate = heredoc.stripTabs ? line.replace(/^\t+/, "") : line
-      if (candidate === heredoc.delimiter) heredocs.shift()
-      continue
-    }
-    if (quote === null && /^\s*gh\s+pr\s+create(?:\s|$)/.test(line)) return true
-    for (let index = 0; index < line.length; index += 1) {
-      const character = line[index]!
-      if (quote === "single") {
-        if (character === "'") quote = null
-        continue
-      }
-      if (character === "\\") {
-        index += 1
-        continue
-      }
-      if (character === '"') {
-        quote = quote === "double" ? null : "double"
-        continue
-      }
-      if (quote === "double") continue
-      if (character === "'") {
-        quote = "single"
-        continue
-      }
-      if (character === "#" && (index === 0 || /\s|[;&|()]/.test(line[index - 1]!))) break
-      if (character !== "<" || line[index + 1] !== "<" || line[index + 2] === "<") continue
-      index += 2
-      const stripTabs = line[index] === "-"
-      if (stripTabs) index += 1
-      while (/\s/.test(line[index] ?? "")) index += 1
-      const delimiterQuote = line[index] === "'" || line[index] === '"' ? line[index++] : null
-      const start = index
-      if (delimiterQuote) {
-        while (index < line.length && line[index] !== delimiterQuote) index += 1
-      } else {
-        while (index < line.length && !/[\s;&|()<>]/.test(line[index]!)) index += 1
-      }
-      const delimiter = line.slice(start, index)
-      if (delimiter) heredocs.push({ delimiter, stripTabs })
-    }
-  }
-  return false
+export function instrumentPullRequestCreate(command: string, markerPath: string): string {
+  return `(\ngh() {\n  if [[ "$1" == pr && "$2" == create ]]; then printf x > "${markerPath}"; fi\n  command gh "$@"\n}\n${command}\n)`
 }
 
 type JsonObject = Record<string, unknown>
@@ -1046,6 +1001,7 @@ export default async function ampSubscribe(amp: PluginAPI) {
     amp.logger.log("amp-subscribe is disabled outside an Amp-managed orb")
     return
   }
+  const pullRequestCreateMarkers = new Map<string, string>()
   const coalescer = new GitHubEventCoalescer()
   const seen = new Set<string>()
   const executions = new Map<string, Promise<void>>()
@@ -1111,9 +1067,28 @@ export default async function ampSubscribe(amp: PluginAPI) {
     },
   })
 
+  amp.on("tool.call", (event) => {
+    const shell = amp.helpers.shellCommandFromToolCall(event)
+    if (!shell || !/gh\s+pr\s+create(?:\s|$)/.test(shell.command)) return { action: "allow" }
+    const commandKey = event.input.command === shell.command ? "command"
+      : event.input.cmd === shell.command ? "cmd"
+        : null
+    if (!commandKey) return { action: "allow" }
+    const markerPath = `/tmp/amp-subscribe-pr-create-${crypto.randomUUID()}`
+    pullRequestCreateMarkers.set(event.toolUseID, markerPath)
+    return {
+      action: "modify",
+      input: { ...event.input, [commandKey]: instrumentPullRequestCreate(shell.command, markerPath) },
+    }
+  })
+
   amp.on("tool.result", async (event, ctx) => {
-    const command = amp.helpers.shellCommandFromToolCall(event)?.command ?? null
-    const target = pullRequestFromShellResult(command, event)
+    const markerPath = pullRequestCreateMarkers.get(event.toolUseID)
+    if (!markerPath) return
+    pullRequestCreateMarkers.delete(event.toolUseID)
+    const createExecuted = existsSync(markerPath)
+    rmSync(markerPath, { force: true })
+    const target = pullRequestFromShellResult(createExecuted, event)
     if (!target) return
     try {
       await subscribe(

@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import type { PluginAPI } from "@ampcode/plugin"
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import ampSubscribe, {
   bridgeConfiguration,
   eventPrompt,
   feedPrompt,
   GitHubEventCoalescer,
+  instrumentPullRequestCreate,
   pullRequestFromShellResult,
 } from "../plugin/github-relay"
 
@@ -43,80 +47,24 @@ describe("bridgeConfiguration", () => {
 })
 
 describe("pullRequestFromShellResult", () => {
-  test("returns the single PR URL from a successful direct create", () => {
-    expect(pullRequestFromShellResult("gh pr create --fill", success({
+  test("returns one PR only after a successful create execution", () => {
+    expect(pullRequestFromShellResult(true, success({
       exitCode: 0,
       output: "https://github.com/lox/project/pull/17\n",
     }))).toEqual({ repository: "lox/project", number: 17 })
-  })
-
-  test("returns the PR when a multiline script prepares its body before creating it", () => {
-    expect(pullRequestFromShellResult([
-      "body_file=$(mktemp)",
-      "cat > \"$body_file\" <<'EOF'",
-      "Pull request body",
-      "EOF",
-      "gh pr create --body-file \"$body_file\"",
-      "rm \"$body_file\"",
-    ].join("\n"), success({
-      exitCode: 0,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toEqual({ repository: "lox/project", number: 17 })
-  })
-
-  test("ignores a create command mentioned only inside a heredoc", () => {
-    expect(pullRequestFromShellResult([
-      "cat <<'EOF'",
-      "gh pr create --fill",
-      "EOF",
-      "gh pr view 17 --json url --jq .url",
-    ].join("\n"), success({
+    expect(pullRequestFromShellResult(false, success({
       exitCode: 0,
       output: "https://github.com/lox/project/pull/17\n",
     }))).toBeNull()
-  })
-
-  test("ignores create commands inside multiline quoted text", () => {
-    expect(pullRequestFromShellResult([
-      "git commit -m 'docs:",
-      "gh pr create --fill",
-      "'",
-      "gh pr view 17 --json url --jq .url",
-    ].join("\n"), success({
-      exitCode: 0,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toBeNull()
-  })
-
-  test("does not treat quoted or commented heredoc operators as redirections", () => {
-    expect(pullRequestFromShellResult([
-      "echo '<<EOF'",
-      "# <<IGNORED",
-      "gh pr create --fill",
-    ].join("\n"), success({
-      exitCode: 0,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toEqual({ repository: "lox/project", number: 17 })
-  })
-
-  test("ignores async, failed, and unsupported shell results", () => {
-    expect(pullRequestFromShellResult(null, success({
-      exitCode: 0,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toBeNull()
-    expect(pullRequestFromShellResult("gh pr create --fill", success({
+    expect(pullRequestFromShellResult(true, success({
       exitCode: 1,
       output: "https://github.com/lox/project/pull/17\n",
     }))).toBeNull()
-    expect(pullRequestFromShellResult("cd app && gh pr create --fill", success({
-      exitCode: 0,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toBeNull()
-    expect(pullRequestFromShellResult("gh pr create --fill", success("unexpected shape"))).toBeNull()
+    expect(pullRequestFromShellResult(true, success("unexpected shape"))).toBeNull()
   })
 
   test("requires exactly one unique PR", () => {
-    expect(pullRequestFromShellResult("gh pr create --fill", success({
+    expect(pullRequestFromShellResult(true, success({
       exitCode: 0,
       output: [
         "https://github.com/lox/project/pull/17",
@@ -124,10 +72,62 @@ describe("pullRequestFromShellResult", () => {
       ].join("\n"),
     }))).toBeNull()
 
-    expect(pullRequestFromShellResult("gh pr create --fill", success({
+    expect(pullRequestFromShellResult(true, success({
       exitCode: 0,
       output: "Created pull request successfully",
     }))).toBeNull()
+  })
+})
+
+async function runInstrumentedCreate(command: string) {
+  const markerPath = `/tmp/amp-subscribe-test-${crypto.randomUUID()}`
+  const bin = mkdtempSync(join(tmpdir(), "amp-subscribe-test-bin-"))
+  const gh = join(bin, "gh")
+  writeFileSync(gh, "#!/bin/sh\nprintf '%s\\n' 'https://github.com/lox/project/pull/17'\n")
+  chmodSync(gh, 0o755)
+  const process = Bun.spawn(["bash", "-c", instrumentPullRequestCreate(command, markerPath)], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...Bun.env, PATH: `${bin}:${Bun.env.PATH}` },
+  })
+  const [output, exitCode] = await Promise.all([
+    new Response(process.stdout).text(),
+    process.exited,
+    new Response(process.stderr).text(),
+  ])
+  const createExecuted = existsSync(markerPath)
+  rmSync(markerPath, { force: true })
+  rmSync(bin, { recursive: true, force: true })
+  return pullRequestFromShellResult(createExecuted, success({ output, exitCode }))
+}
+
+describe("instrumentPullRequestCreate", () => {
+  test("observes a create after multiline PR body preparation", async () => {
+    expect(await runInstrumentedCreate([
+      "body_file=$(mktemp)",
+      "cat > \"$body_file\" <<'EOF'",
+      "Pull request body",
+      "EOF",
+      "gh pr create --body-file \"$body_file\"",
+      "rm \"$body_file\"",
+    ].join("\n"))).toEqual({ repository: "lox/project", number: 17 })
+  })
+
+  test("ignores command text that Bash does not execute", async () => {
+    for (const command of [
+      ["cat <<'EOF'", "gh pr create --fill", "EOF", "gh pr view 17"],
+      ["printf '%s' 'gh pr create --fill'", "gh pr view 17"],
+      ["if false; then", "  gh pr create --fill", "fi", "gh pr view 17"],
+    ]) {
+      expect(await runInstrumentedCreate(command.join("\n"))).toBeNull()
+    }
+  })
+
+  test("does not confuse arithmetic shifts with heredocs", async () => {
+    expect(await runInstrumentedCreate([
+      "flags=$((1 << 2))",
+      "gh pr create --fill",
+    ].join("\n"))).toEqual({ repository: "lox/project", number: 17 })
   })
 })
 
