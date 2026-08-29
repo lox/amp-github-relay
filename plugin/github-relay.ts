@@ -1,5 +1,5 @@
-import type { PluginAPI, ToolResultEvent } from "@ampcode/plugin"
-import { existsSync, rmSync } from "node:fs"
+import type { PluginAPI } from "@ampcode/plugin"
+import { existsSync, readFileSync, rmSync } from "node:fs"
 
 // Keep this filename stable: Amp durable webhook identity is scoped to the plugin and thread.
 export const description = "Lets an Amp thread subscribe to GitHub pull requests, branches, and RSS or Atom feeds."
@@ -117,17 +117,10 @@ async function subscribeToFeed(
   return result.subscription
 }
 
-export function pullRequestFromShellResult(
-  createExecuted: boolean,
-  event: Pick<ToolResultEvent, "status" | "output">,
-): { repository: string; number: number } | null {
-  if (event.status !== "done" || !createExecuted) return null
-  if (typeof event.output !== "object" || event.output === null) return null
-  const result = event.output as Record<string, unknown>
-  if (result.exitCode !== 0 || typeof result.output !== "string") return null
-
+export function pullRequestFromCreateOutput(output: string | null): { repository: string; number: number } | null {
+  if (output === null) return null
   const targets = new Map<string, { repository: string; number: number }>()
-  for (const line of result.output.split("\n")) {
+  for (const line of output.split("\n")) {
     try {
       const target = parsePullRequest(line.trim(), null)
       targets.set(`${target.repository}#${target.number}`, target)
@@ -139,7 +132,7 @@ export function pullRequestFromShellResult(
 }
 
 export function instrumentPullRequestCreate(command: string, markerPath: string): string {
-  return `(\ngh() {\n  if [[ "$1" == pr && "$2" == create ]]; then printf x > "${markerPath}"; fi\n  command gh "$@"\n}\n${command}\n)`
+  return `(\ngh() {\n  if [[ "$1" == pr && "$2" == create ]]; then\n    local output status\n    output=$(command gh "$@")\n    status=$?\n    if [[ -n "$output" ]]; then printf '%s\\n' "$output"; fi\n    if [[ $status -eq 0 ]]; then printf '%s\\n' "$output" >> "${markerPath}"; fi\n    return "$status"\n  fi\n  command gh "$@"\n}\n${command}\n)`
 }
 
 type JsonObject = Record<string, unknown>
@@ -1086,9 +1079,9 @@ export default async function ampSubscribe(amp: PluginAPI) {
     const markerPath = pullRequestCreateMarkers.get(event.toolUseID)
     if (!markerPath) return
     pullRequestCreateMarkers.delete(event.toolUseID)
-    const createExecuted = existsSync(markerPath)
+    const createOutput = existsSync(markerPath) ? readFileSync(markerPath, "utf8") : null
     rmSync(markerPath, { force: true })
-    const target = pullRequestFromShellResult(createExecuted, event)
+    const target = pullRequestFromCreateOutput(createOutput)
     if (!target) return
     try {
       await subscribe(

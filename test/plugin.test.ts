@@ -9,13 +9,8 @@ import ampSubscribe, {
   feedPrompt,
   GitHubEventCoalescer,
   instrumentPullRequestCreate,
-  pullRequestFromShellResult,
+  pullRequestFromCreateOutput,
 } from "../plugin/github-relay"
-
-const success = (output: unknown) => ({
-  status: "done" as const,
-  output,
-})
 
 describe("bridgeConfiguration", () => {
   test("keeps the legacy audience for a legacy self-hosted URL", () => {
@@ -46,36 +41,19 @@ describe("bridgeConfiguration", () => {
   })
 })
 
-describe("pullRequestFromShellResult", () => {
-  test("returns one PR only after a successful create execution", () => {
-    expect(pullRequestFromShellResult(true, success({
-      exitCode: 0,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toEqual({ repository: "lox/project", number: 17 })
-    expect(pullRequestFromShellResult(false, success({
-      exitCode: 0,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toBeNull()
-    expect(pullRequestFromShellResult(true, success({
-      exitCode: 1,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toBeNull()
-    expect(pullRequestFromShellResult(true, success("unexpected shape"))).toBeNull()
+describe("pullRequestFromCreateOutput", () => {
+  test("returns one PR from successful create output", () => {
+    expect(pullRequestFromCreateOutput("https://github.com/lox/project/pull/17\n"))
+      .toEqual({ repository: "lox/project", number: 17 })
+    expect(pullRequestFromCreateOutput(null)).toBeNull()
   })
 
   test("requires exactly one unique PR", () => {
-    expect(pullRequestFromShellResult(true, success({
-      exitCode: 0,
-      output: [
-        "https://github.com/lox/project/pull/17",
-        "https://github.com/lox/other/pull/18",
-      ].join("\n"),
-    }))).toBeNull()
-
-    expect(pullRequestFromShellResult(true, success({
-      exitCode: 0,
-      output: "Created pull request successfully",
-    }))).toBeNull()
+    expect(pullRequestFromCreateOutput([
+      "https://github.com/lox/project/pull/17",
+      "https://github.com/lox/other/pull/18",
+    ].join("\n"))).toBeNull()
+    expect(pullRequestFromCreateOutput("Created pull request successfully")).toBeNull()
   })
 })
 
@@ -83,7 +61,11 @@ async function runInstrumentedCreate(command: string) {
   const markerPath = `/tmp/amp-subscribe-test-${crypto.randomUUID()}`
   const bin = mkdtempSync(join(tmpdir(), "amp-subscribe-test-bin-"))
   const gh = join(bin, "gh")
-  writeFileSync(gh, "#!/bin/sh\nprintf '%s\\n' 'https://github.com/lox/project/pull/17'\n")
+  writeFileSync(gh, [
+    "#!/bin/sh",
+    "if [ \"$GH_CREATE_FAIL\" = 1 ] && [ \"$1 $2\" = \"pr create\" ]; then exit 1; fi",
+    "printf '%s\\n' 'https://github.com/lox/project/pull/17'",
+  ].join("\n"))
   chmodSync(gh, 0o755)
   const process = Bun.spawn(["bash", "-c", instrumentPullRequestCreate(command, markerPath)], {
     stdout: "pipe",
@@ -95,22 +77,22 @@ async function runInstrumentedCreate(command: string) {
     process.exited,
     new Response(process.stderr).text(),
   ])
-  const createExecuted = existsSync(markerPath)
+  const createOutput = existsSync(markerPath) ? await Bun.file(markerPath).text() : null
   rmSync(markerPath, { force: true })
   rmSync(bin, { recursive: true, force: true })
-  return pullRequestFromShellResult(createExecuted, success({ output, exitCode }))
+  return { target: pullRequestFromCreateOutput(createOutput), output, exitCode }
 }
 
 describe("instrumentPullRequestCreate", () => {
   test("observes a create after multiline PR body preparation", async () => {
-    expect(await runInstrumentedCreate([
+    expect((await runInstrumentedCreate([
       "body_file=$(mktemp)",
       "cat > \"$body_file\" <<'EOF'",
       "Pull request body",
       "EOF",
       "gh pr create --body-file \"$body_file\"",
       "rm \"$body_file\"",
-    ].join("\n"))).toEqual({ repository: "lox/project", number: 17 })
+    ].join("\n"))).target).toEqual({ repository: "lox/project", number: 17 })
   })
 
   test("ignores command text that Bash does not execute", async () => {
@@ -119,15 +101,30 @@ describe("instrumentPullRequestCreate", () => {
       ["printf '%s' 'gh pr create --fill'", "gh pr view 17"],
       ["if false; then", "  gh pr create --fill", "fi", "gh pr view 17"],
     ]) {
-      expect(await runInstrumentedCreate(command.join("\n"))).toBeNull()
+      expect((await runInstrumentedCreate(command.join("\n"))).target).toBeNull()
     }
   })
 
   test("does not confuse arithmetic shifts with heredocs", async () => {
-    expect(await runInstrumentedCreate([
+    expect((await runInstrumentedCreate([
       "flags=$((1 << 2))",
       "gh pr create --fill",
-    ].join("\n"))).toEqual({ repository: "lox/project", number: 17 })
+    ].join("\n"))).target).toEqual({ repository: "lox/project", number: 17 })
+  })
+
+  test("associates success and output with the create command itself", async () => {
+    const failedCreate = await runInstrumentedCreate([
+      "GH_CREATE_FAIL=1 gh pr create --fill || true",
+      "gh pr view 99",
+    ].join("\n"))
+    expect(failedCreate.target).toBeNull()
+
+    const failedCleanup = await runInstrumentedCreate([
+      "gh pr create --fill",
+      "false",
+    ].join("\n"))
+    expect(failedCleanup.exitCode).toBe(1)
+    expect(failedCleanup.target).toEqual({ repository: "lox/project", number: 17 })
   })
 })
 
