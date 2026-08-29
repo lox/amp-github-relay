@@ -76,6 +76,29 @@ describe("pullRequestFromShellResult", () => {
     }))).toBeNull()
   })
 
+  test("ignores create commands inside multiline quoted text", () => {
+    expect(pullRequestFromShellResult([
+      "git commit -m 'docs:",
+      "gh pr create --fill",
+      "'",
+      "gh pr view 17 --json url --jq .url",
+    ].join("\n"), success({
+      exitCode: 0,
+      output: "https://github.com/lox/project/pull/17\n",
+    }))).toBeNull()
+  })
+
+  test("does not treat quoted or commented heredoc operators as redirections", () => {
+    expect(pullRequestFromShellResult([
+      "echo '<<EOF'",
+      "# <<IGNORED",
+      "gh pr create --fill",
+    ].join("\n"), success({
+      exitCode: 0,
+      output: "https://github.com/lox/project/pull/17\n",
+    }))).toEqual({ repository: "lox/project", number: 17 })
+  })
+
   test("ignores async, failed, and unsupported shell results", () => {
     expect(pullRequestFromShellResult(null, success({
       exitCode: 0,

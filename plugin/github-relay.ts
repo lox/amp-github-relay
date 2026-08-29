@@ -139,6 +139,7 @@ export function pullRequestFromShellResult(
 
 function shellRunsPullRequestCreate(command: string): boolean {
   const heredocs: Array<{ delimiter: string; stripTabs: boolean }> = []
+  let quote: "single" | "double" | null = null
   for (const line of command.split("\n")) {
     const heredoc = heredocs[0]
     if (heredoc) {
@@ -146,9 +147,41 @@ function shellRunsPullRequestCreate(command: string): boolean {
       if (candidate === heredoc.delimiter) heredocs.shift()
       continue
     }
-    if (/^\s*gh\s+pr\s+create(?:\s|$)/.test(line)) return true
-    for (const match of line.matchAll(/<<(-)?\s*(?:'([^']+)'|"([^"]+)"|([^\s;&|()<>]+))/g)) {
-      heredocs.push({ delimiter: match[2] ?? match[3] ?? match[4]!, stripTabs: match[1] === "-" })
+    if (quote === null && /^\s*gh\s+pr\s+create(?:\s|$)/.test(line)) return true
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index]!
+      if (quote === "single") {
+        if (character === "'") quote = null
+        continue
+      }
+      if (character === "\\") {
+        index += 1
+        continue
+      }
+      if (character === '"') {
+        quote = quote === "double" ? null : "double"
+        continue
+      }
+      if (quote === "double") continue
+      if (character === "'") {
+        quote = "single"
+        continue
+      }
+      if (character === "#" && (index === 0 || /\s|[;&|()]/.test(line[index - 1]!))) break
+      if (character !== "<" || line[index + 1] !== "<" || line[index + 2] === "<") continue
+      index += 2
+      const stripTabs = line[index] === "-"
+      if (stripTabs) index += 1
+      while (/\s/.test(line[index] ?? "")) index += 1
+      const delimiterQuote = line[index] === "'" || line[index] === '"' ? line[index++] : null
+      const start = index
+      if (delimiterQuote) {
+        while (index < line.length && line[index] !== delimiterQuote) index += 1
+      } else {
+        while (index < line.length && !/[\s;&|()<>]/.test(line[index]!)) index += 1
+      }
+      const delimiter = line.slice(start, index)
+      if (delimiter) heredocs.push({ delimiter, stripTabs })
     }
   }
   return false
