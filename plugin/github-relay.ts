@@ -120,7 +120,7 @@ export function pullRequestFromShellResult(
   command: string | null,
   event: Pick<ToolResultEvent, "status" | "output">,
 ): { repository: string; number: number } | null {
-  if (event.status !== "done" || !command || !/^\s*gh\s+pr\s+create(?:\s|$)/m.test(command)) return null
+  if (event.status !== "done" || !command || !shellRunsPullRequestCreate(command)) return null
   if (typeof event.output !== "object" || event.output === null) return null
   const result = event.output as Record<string, unknown>
   if (result.exitCode !== 0 || typeof result.output !== "string") return null
@@ -135,6 +135,23 @@ export function pullRequestFromShellResult(
     }
   }
   return targets.size === 1 ? [...targets.values()][0] : null
+}
+
+function shellRunsPullRequestCreate(command: string): boolean {
+  const heredocs: Array<{ delimiter: string; stripTabs: boolean }> = []
+  for (const line of command.split("\n")) {
+    const heredoc = heredocs[0]
+    if (heredoc) {
+      const candidate = heredoc.stripTabs ? line.replace(/^\t+/, "") : line
+      if (candidate === heredoc.delimiter) heredocs.shift()
+      continue
+    }
+    if (/^\s*gh\s+pr\s+create(?:\s|$)/.test(line)) return true
+    for (const match of line.matchAll(/<<(-)?\s*(?:'([^']+)'|"([^"]+)"|([^\s;&|()<>]+))/g)) {
+      heredocs.push({ delimiter: match[2] ?? match[3] ?? match[4]!, stripTabs: match[1] === "-" })
+    }
+  }
+  return false
 }
 
 type JsonObject = Record<string, unknown>

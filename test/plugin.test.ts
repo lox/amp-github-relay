@@ -64,6 +64,18 @@ describe("pullRequestFromShellResult", () => {
     }))).toEqual({ repository: "lox/project", number: 17 })
   })
 
+  test("ignores a create command mentioned only inside a heredoc", () => {
+    expect(pullRequestFromShellResult([
+      "cat <<'EOF'",
+      "gh pr create --fill",
+      "EOF",
+      "gh pr view 17 --json url --jq .url",
+    ].join("\n"), success({
+      exitCode: 0,
+      output: "https://github.com/lox/project/pull/17\n",
+    }))).toBeNull()
+  })
+
   test("ignores async, failed, and unsupported shell results", () => {
     expect(pullRequestFromShellResult(null, success({
       exitCode: 0,
