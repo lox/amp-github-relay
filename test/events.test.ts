@@ -86,6 +86,51 @@ describe("normalizeGitHubEvent", () => {
     expect(JSON.stringify(event)).not.toContain("old-base")
   })
 
+  test("routes newly opened pull requests and issues to repository subscriptions", () => {
+    const openedPullRequest = normalizeGitHubEvent("pull_request", "delivery-open-pr", {
+      action: "opened",
+      repository,
+      pull_request: { ...pullRequest, title: "UNTRUSTED_SENTINEL" },
+      sender: { login: "contributor" },
+    })
+    expect(openedPullRequest).toHaveLength(2)
+    expect(openedPullRequest[1]).toMatchObject({
+      githubEvent: "pull_request",
+      event: "pull_requests",
+      action: "opened",
+      targetType: "repository",
+      subject: {
+        kind: "pull_request",
+        number: 17,
+        url: "https://github.com/lox/project/pull/17",
+      },
+    })
+    expect(JSON.stringify(openedPullRequest)).not.toContain("UNTRUSTED_SENTINEL")
+
+    expect(normalizeGitHubEvent("issues", "delivery-open-issue", {
+      action: "opened",
+      repository,
+      issue: { number: 23, title: "UNTRUSTED_SENTINEL", body: "UNTRUSTED_SENTINEL" },
+      sender: { login: "reporter" },
+    })).toEqual([expect.objectContaining({
+      githubEvent: "issues",
+      event: "issues",
+      action: "opened",
+      targetType: "repository",
+      subject: {
+        kind: "issue",
+        number: 23,
+        url: "https://github.com/lox/project/issues/23",
+      },
+    })])
+
+    expect(normalizeGitHubEvent("issues", "delivery-edit-issue", {
+      action: "edited",
+      repository,
+      issue: { number: 23 },
+    })).toEqual([])
+  })
+
   test("includes review state, author, URL, and commit", () => {
     const event = normalizeGitHubEvent("pull_request_review", "delivery-review", {
       action: "submitted",

@@ -16,15 +16,15 @@ GitHub: A check failed on acme/widgets#123.
 Amp: The Linux test job failed because...
 ```
 
-GitHub pull requests and branches, plus RSS and Atom feeds, are supported today. The bridge is
-designed to support other event sources, such as Slack, in the future.
+GitHub repositories, pull requests, and branches, plus RSS and Atom feeds, are supported today. The
+bridge is designed to support other event sources, such as Slack, in the future.
 
 ## Why use it?
 
 - **Hand work off and move on.** You do not need to keep checking a PR or wake the thread manually.
 - **Keep the useful context.** Reviews and failures return to the thread that understands the work.
 - **Choose how Amp responds.** It can only notify you, investigate the event, or make a local fix.
-- **Watch long-running work.** A thread can follow a PR, `main`, or a release branch while idle.
+- **Watch long-running work.** A thread can follow new work in a repository, a PR, `main`, or a release branch while idle.
 
 ## Quick start
 
@@ -58,6 +58,15 @@ watch. To run your own bridge, see [Self-hosting](#self-hosting).
    Subscribe this thread to the main branch of owner/repo.
    Notify me about pushes and CI failures.
    ```
+
+   Or watch for new pull requests and issues in a repository:
+
+   ```text
+   Subscribe this thread to new pull requests and issues in owner/repo.
+   ```
+
+   Repository subscriptions report only newly opened pull requests and issues; later activity can
+   be followed with a pull request subscription.
 
    Or subscribe to a feed:
 

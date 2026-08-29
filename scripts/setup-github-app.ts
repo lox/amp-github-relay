@@ -4,6 +4,7 @@ import { createInterface } from "node:readline/promises"
 const githubEvents = [
   "push",
   "pull_request",
+  "issues",
   "pull_request_review",
   "pull_request_review_comment",
   "issue_comment",

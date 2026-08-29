@@ -1,5 +1,6 @@
 export const subscriptionEvents = [
   "pull_requests",
+  "issues",
   "commits",
   "reviews",
   "review_comments",
@@ -117,6 +118,7 @@ interface SubscriptionBase {
 export type Subscription = SubscriptionBase & (
   | { targetType: "pull_request"; pullRequestNumber: number }
   | { targetType: "branch"; branch: string }
+  | { targetType: "repository" }
 )
 
 export interface FeedSubscription {
@@ -162,4 +164,8 @@ interface RoutedEventBase {
 export type RoutedEvent = RoutedEventBase & (
   | { targetType: "pull_request"; pullRequest: { number: number; url: string; headSha?: string } }
   | { targetType: "branch"; branch: { name: string; url: string } }
+  | {
+      targetType: "repository"
+      subject: { kind: "pull_request" | "issue"; number: number; url: string }
+    }
 )

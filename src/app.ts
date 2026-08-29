@@ -96,7 +96,7 @@ export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
       const events = input?.events
       const behavior = input?.behavior
       if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) return json({ error: "invalid repository" }, 400)
-      if (targetType !== "pull_request" && targetType !== "branch") {
+      if (targetType !== "pull_request" && targetType !== "branch" && targetType !== "repository") {
         return json({ error: "invalid targetType" }, 400)
       }
       if (targetType === "pull_request" && (!Number.isInteger(pullRequestNumber) || (pullRequestNumber as number) < 1)) {
@@ -109,8 +109,14 @@ export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
         return json({ error: "webhookUrl host is not allowed" }, 400)
       }
       if (!validEvents(events)) return json({ error: "invalid events" }, 400)
+      if (targetType === "pull_request" && events.includes("issues")) {
+        return json({ error: "pull request subscriptions do not support issues" }, 400)
+      }
       if (targetType === "branch" && events.some((event) => event !== "commits" && event !== "checks")) {
         return json({ error: "branch subscriptions support only commits and checks" }, 400)
+      }
+      if (targetType === "repository" && events.some((event) => event !== "pull_requests" && event !== "issues")) {
+        return json({ error: "repository subscriptions support only pull_requests and issues" }, 400)
       }
       if (!validBehavior(behavior)) return json({ error: "invalid behavior" }, 400)
       const common = {
@@ -122,7 +128,9 @@ export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
       }
       const subscription = targetType === "pull_request"
         ? database.upsert({ ...common, targetType, pullRequestNumber: pullRequestNumber as number })
-        : database.upsert({ ...common, targetType, branch: branch as string })
+        : targetType === "branch"
+          ? database.upsert({ ...common, targetType, branch: branch as string })
+          : database.upsert({ ...common, targetType })
       const { webhookUrl: _, ...safeSubscription } = subscription
       return json({ subscription: safeSubscription }, 201)
     }
@@ -164,10 +172,12 @@ export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
     for (const event of events) {
       const target = event.targetType === "pull_request"
         ? String(event.pullRequest.number)
-        : event.branch.name
+        : event.targetType === "branch" ? event.branch.name : "*"
       const idempotencyKey = event.targetType === "pull_request"
         ? `${deliveryId}:${event.event}:${event.repository.id}:${target}`
-        : `${deliveryId}:${event.event}:${event.repository.id}:branch:${encodeURIComponent(target)}`
+        : event.targetType === "branch"
+          ? `${deliveryId}:${event.event}:${event.repository.id}:branch:${encodeURIComponent(target)}`
+          : `${deliveryId}:${event.event}:${event.repository.id}:repository`
       for (const subscription of database.matching(
         event.repository.fullName,
         event.targetType,

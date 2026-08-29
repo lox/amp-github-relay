@@ -1,17 +1,16 @@
 import { describe, expect, test } from "bun:test"
 import type { PluginAPI } from "@ampcode/plugin"
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import ampSubscribe, {
   bridgeConfiguration,
   eventPrompt,
   feedPrompt,
   GitHubEventCoalescer,
-  pullRequestFromShellResult,
+  instrumentPullRequestCreate,
+  pullRequestFromCreateOutput,
 } from "../plugin/subscribe"
-
-const success = (output: unknown) => ({
-  status: "done" as const,
-  output,
-})
 
 describe("bridgeConfiguration", () => {
   test("keeps the legacy audience for a legacy self-hosted URL", () => {
@@ -42,43 +41,90 @@ describe("bridgeConfiguration", () => {
   })
 })
 
-describe("pullRequestFromShellResult", () => {
-  test("returns the single PR URL from a successful direct create", () => {
-    expect(pullRequestFromShellResult("gh pr create --fill", success({
-      exitCode: 0,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toEqual({ repository: "lox/project", number: 17 })
-  })
-
-  test("ignores async, failed, and unsupported shell results", () => {
-    expect(pullRequestFromShellResult(null, success({
-      exitCode: 0,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toBeNull()
-    expect(pullRequestFromShellResult("gh pr create --fill", success({
-      exitCode: 1,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toBeNull()
-    expect(pullRequestFromShellResult("cd app && gh pr create --fill", success({
-      exitCode: 0,
-      output: "https://github.com/lox/project/pull/17\n",
-    }))).toBeNull()
-    expect(pullRequestFromShellResult("gh pr create --fill", success("unexpected shape"))).toBeNull()
+describe("pullRequestFromCreateOutput", () => {
+  test("returns one PR from successful create output", () => {
+    expect(pullRequestFromCreateOutput("https://github.com/lox/project/pull/17\n"))
+      .toEqual({ repository: "lox/project", number: 17 })
+    expect(pullRequestFromCreateOutput(null)).toBeNull()
   })
 
   test("requires exactly one unique PR", () => {
-    expect(pullRequestFromShellResult("gh pr create --fill", success({
-      exitCode: 0,
-      output: [
-        "https://github.com/lox/project/pull/17",
-        "https://github.com/lox/other/pull/18",
-      ].join("\n"),
-    }))).toBeNull()
+    expect(pullRequestFromCreateOutput([
+      "https://github.com/lox/project/pull/17",
+      "https://github.com/lox/other/pull/18",
+    ].join("\n"))).toBeNull()
+    expect(pullRequestFromCreateOutput("Created pull request successfully")).toBeNull()
+  })
+})
 
-    expect(pullRequestFromShellResult("gh pr create --fill", success({
-      exitCode: 0,
-      output: "Created pull request successfully",
-    }))).toBeNull()
+async function runInstrumentedCreate(command: string) {
+  const markerPath = `/tmp/amp-subscribe-test-${crypto.randomUUID()}`
+  const bin = mkdtempSync(join(tmpdir(), "amp-subscribe-test-bin-"))
+  const gh = join(bin, "gh")
+  writeFileSync(gh, [
+    "#!/bin/sh",
+    "if [ \"$GH_CREATE_FAIL\" = 1 ] && [ \"$1 $2\" = \"pr create\" ]; then exit 1; fi",
+    "printf '%s\\n' 'https://github.com/lox/project/pull/17'",
+  ].join("\n"))
+  chmodSync(gh, 0o755)
+  const process = Bun.spawn(["bash", "-c", instrumentPullRequestCreate(command, markerPath)], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...Bun.env, PATH: `${bin}:${Bun.env.PATH}` },
+  })
+  const [output, exitCode] = await Promise.all([
+    new Response(process.stdout).text(),
+    process.exited,
+    new Response(process.stderr).text(),
+  ])
+  const createOutput = existsSync(markerPath) ? await Bun.file(markerPath).text() : null
+  rmSync(markerPath, { force: true })
+  rmSync(bin, { recursive: true, force: true })
+  return { target: pullRequestFromCreateOutput(createOutput), output, exitCode }
+}
+
+describe("instrumentPullRequestCreate", () => {
+  test("observes a create after multiline PR body preparation", async () => {
+    expect((await runInstrumentedCreate([
+      "body_file=$(mktemp)",
+      "cat > \"$body_file\" <<'EOF'",
+      "Pull request body",
+      "EOF",
+      "gh pr create --body-file \"$body_file\"",
+      "rm \"$body_file\"",
+    ].join("\n"))).target).toEqual({ repository: "lox/project", number: 17 })
+  })
+
+  test("ignores command text that Bash does not execute", async () => {
+    for (const command of [
+      ["cat <<'EOF'", "gh pr create --fill", "EOF", "gh pr view 17"],
+      ["printf '%s' 'gh pr create --fill'", "gh pr view 17"],
+      ["if false; then", "  gh pr create --fill", "fi", "gh pr view 17"],
+    ]) {
+      expect((await runInstrumentedCreate(command.join("\n"))).target).toBeNull()
+    }
+  })
+
+  test("does not confuse arithmetic shifts with heredocs", async () => {
+    expect((await runInstrumentedCreate([
+      "flags=$((1 << 2))",
+      "gh pr create --fill",
+    ].join("\n"))).target).toEqual({ repository: "lox/project", number: 17 })
+  })
+
+  test("associates success and output with the create command itself", async () => {
+    const failedCreate = await runInstrumentedCreate([
+      "GH_CREATE_FAIL=1 gh pr create --fill || true",
+      "gh pr view 99",
+    ].join("\n"))
+    expect(failedCreate.target).toBeNull()
+
+    const failedCleanup = await runInstrumentedCreate([
+      "gh pr create --fill",
+      "false",
+    ].join("\n"))
+    expect(failedCleanup.exitCode).toBe(1)
+    expect(failedCleanup.target).toEqual({ repository: "lox/project", number: 17 })
   })
 })
 
@@ -176,6 +222,43 @@ describe("eventPrompt", () => {
     expect(prompt).toContain("Commits: aaaaaaaaaaaa → bbbbbbbbbbbb.")
     expect(prompt).toContain("Force-pushed.")
     expect(prompt).toContain("Branch: https://github.com/lox/project/tree/main")
+  })
+
+  test("renders repository-level pull request and issue events", () => {
+    const issuePrompt = eventPrompt({
+      ...baseEvent,
+      githubEvent: "issues",
+      event: "issues",
+      action: "opened",
+      targetType: "repository",
+      pullRequest: undefined,
+      subject: { kind: "issue", number: 23, url: "https://github.com/lox/project/issues/23" },
+    })
+    expect(issuePrompt).toContain("Issue opened on lox/project#23 by @reviewer.")
+    expect(issuePrompt).toContain("Issue: https://github.com/lox/project/issues/23")
+
+    const pullRequestPrompt = eventPrompt({
+      ...baseEvent,
+      githubEvent: "pull_request",
+      event: "pull_requests",
+      action: "opened",
+      targetType: "repository",
+      pullRequest: undefined,
+      subject: { kind: "pull_request", number: 24, url: "https://github.com/lox/project/pull/24" },
+      detail: { kind: "pull_request", state: "open" },
+    })
+    expect(pullRequestPrompt).toContain("Pull request opened on lox/project#24 by @reviewer.")
+    expect(pullRequestPrompt).toContain("PR: https://github.com/lox/project/pull/24")
+
+    expect(() => eventPrompt({
+      ...baseEvent,
+      githubEvent: "issues",
+      event: "issues",
+      action: "edited",
+      targetType: "repository",
+      pullRequest: undefined,
+      subject: { kind: "issue", number: 23, url: "https://github.com/lox/project/issues/23" },
+    })).toThrow("Rejected malformed GitHub event")
   })
 
   test("renders schema version 1 events without detail", () => {

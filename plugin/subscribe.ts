@@ -1,9 +1,10 @@
-import type { PluginAPI, ToolResultEvent } from "@ampcode/plugin"
+import type { PluginAPI } from "@ampcode/plugin"
+import { existsSync, readFileSync, rmSync } from "node:fs"
 
 // Keep subscribe.ts stable: Amp durable webhook identity is scoped to the plugin and thread.
-export const description = "Lets an Amp thread subscribe to GitHub pull requests, branches, and RSS or Atom feeds."
+export const description = "Lets an Amp thread subscribe to GitHub repositories, pull requests, branches, and RSS or Atom feeds."
 
-const defaultEvents = [
+const pullRequestEvents = [
   "pull_requests",
   "commits",
   "reviews",
@@ -13,6 +14,8 @@ const defaultEvents = [
   "merged",
   "closed",
 ]
+const repositoryEvents = ["pull_requests", "issues"]
+const supportedEvents = [...pullRequestEvents, "issues"]
 const automaticPullRequestEvents = [
   "commits",
   "reviews",
@@ -27,6 +30,7 @@ const defaultBranchEvents = ["commits", "checks"]
 type SubscriptionTarget =
   | { targetType: "pull_request"; repository: string; number: number }
   | { targetType: "branch"; repository: string; branch: string }
+  | { targetType: "repository"; repository: string }
 
 function parsePullRequest(value: string, repository: string | null): { repository: string; number: number } {
   const url = value.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/.*)?$/)
@@ -92,7 +96,7 @@ async function subscribe(
       targetType: target.targetType,
       ...(target.targetType === "pull_request"
         ? { pullRequestNumber: target.number }
-        : { branch: target.branch }),
+        : target.targetType === "branch" ? { branch: target.branch } : {}),
       webhookUrl,
       events,
       behavior,
@@ -116,17 +120,10 @@ async function subscribeToFeed(
   return result.subscription
 }
 
-export function pullRequestFromShellResult(
-  command: string | null,
-  event: Pick<ToolResultEvent, "status" | "output">,
-): { repository: string; number: number } | null {
-  if (event.status !== "done" || !command || !/^\s*gh\s+pr\s+create(?:\s|$)/.test(command)) return null
-  if (typeof event.output !== "object" || event.output === null) return null
-  const result = event.output as Record<string, unknown>
-  if (result.exitCode !== 0 || typeof result.output !== "string") return null
-
+export function pullRequestFromCreateOutput(output: string | null): { repository: string; number: number } | null {
+  if (output === null) return null
   const targets = new Map<string, { repository: string; number: number }>()
-  for (const line of result.output.split("\n")) {
+  for (const line of output.split("\n")) {
     try {
       const target = parsePullRequest(line.trim(), null)
       targets.set(`${target.repository}#${target.number}`, target)
@@ -135,6 +132,10 @@ export function pullRequestFromShellResult(
     }
   }
   return targets.size === 1 ? [...targets.values()][0] : null
+}
+
+export function instrumentPullRequestCreate(command: string, markerPath: string): string {
+  return `(\ngh() {\n  if [[ "$1" == pr && "$2" == create ]]; then\n    local output status\n    output=$(command gh "$@")\n    status=$?\n    if [[ -n "$output" ]]; then printf '%s\\n' "$output"; fi\n    if [[ $status -eq 0 ]]; then printf '%s\\n' "$output" >> "${markerPath}"; fi\n    return "$status"\n  fi\n  command gh "$@"\n}\n${command}\n)`
 }
 
 type JsonObject = Record<string, unknown>
@@ -327,12 +328,14 @@ function eventMatchesGitHubEvent(githubEvent: string, event: string, action: str
   if (githubEvent === "pull_request_review") return event === "reviews"
   if (githubEvent === "pull_request_review_comment") return event === "review_comments"
   if (githubEvent === "issue_comment") return event === "discussion_comments"
+  if (githubEvent === "issues") return event === "issues" && action === "opened"
   return event === "checks"
 }
 
 function promptMetadata(payload: JsonObject): JsonObject {
   const repository = object(payload.repository)
   const pullRequest = object(payload.pullRequest)
+  const subject = object(payload.subject)
   const deliveryId = matchingString(payload.deliveryId, /^[A-Za-z0-9-]+$/, 128)
   const githubEvent = enumValue(payload.githubEvent, [
     "push",
@@ -340,11 +343,12 @@ function promptMetadata(payload: JsonObject): JsonObject {
     "pull_request_review",
     "pull_request_review_comment",
     "issue_comment",
+    "issues",
     "check_run",
     "check_suite",
     "workflow_run",
   ] as const)
-  const event = enumValue(payload.event, defaultEvents)
+  const event = enumValue(payload.event, supportedEvents)
   const action = matchingString(payload.action, /^[a-z0-9_]+$/, 64)
   const repositoryId = positiveInteger(repository?.id)
   const fullName = matchingString(repository?.fullName, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, 201)
@@ -357,17 +361,28 @@ function promptMetadata(payload: JsonObject): JsonObject {
   const branchValue = branchName(branch?.name)
   const branchValueUrl = githubUrl(branch?.url)
   const canonicalBranchUrl = fullName && branchValue ? branchUrl(fullName, branchValue) : undefined
+  const subjectKind = enumValue(subject?.kind, ["pull_request", "issue"] as const)
+  const subjectNumber = positiveInteger(subject?.number)
+  const subjectUrl = githubUrl(subject?.url)
+  const canonicalSubjectUrl = fullName && subjectKind && subjectNumber
+    ? `https://github.com/${fullName}/${subjectKind === "pull_request" ? "pull" : "issues"}/${subjectNumber}`
+    : undefined
   const pullRequestHeadSha = sha(pullRequest?.headSha)
-  const targetType = enumValue(payload.targetType, ["pull_request", "branch"] as const)
+  const targetType = enumValue(payload.targetType, ["pull_request", "branch", "repository"] as const)
     ?? (pullRequest ? "pull_request" : undefined)
   const validTarget = targetType === "pull_request"
-    ? !!pullRequestNumber && pullRequestUrl === canonicalPullRequestUrl && !branch
+    ? !!pullRequestNumber && pullRequestUrl === canonicalPullRequestUrl && !branch && !subject
     : targetType === "branch"
-      ? !!branchValue && branchValueUrl === canonicalBranchUrl && !pullRequest
-      : false
+      ? !!branchValue && branchValueUrl === canonicalBranchUrl && !pullRequest && !subject
+      : targetType === "repository"
+        ? !!subjectKind && !!subjectNumber && subjectUrl === canonicalSubjectUrl && !pullRequest && !branch
+        : false
   const validEventTarget = targetType === "branch"
     ? githubEvent === "push" || githubEvent === "check_run" || githubEvent === "check_suite" || githubEvent === "workflow_run"
-    : githubEvent !== "push"
+    : targetType === "repository"
+      ? action === "opened" && ((githubEvent === "pull_request" && subjectKind === "pull_request")
+        || (githubEvent === "issues" && subjectKind === "issue"))
+      : githubEvent !== "push" && githubEvent !== "issues"
   if (payload.schemaVersion !== 1 || !deliveryId || !githubEvent || !event || !action
     || !repositoryId || !fullName || !validTarget || !validEventTarget
     || !eventMatchesGitHubEvent(githubEvent, event, action)) {
@@ -387,7 +402,9 @@ function promptMetadata(payload: JsonObject): JsonObject {
           url: canonicalPullRequestUrl,
           ...(pullRequestHeadSha ? { headSha: pullRequestHeadSha } : {}),
         } }
-      : { branch: { name: branchValue, url: canonicalBranchUrl } }),
+      : targetType === "branch"
+        ? { branch: { name: branchValue, url: canonicalBranchUrl } }
+        : { subject: { kind: subjectKind, number: subjectNumber, url: canonicalSubjectUrl } }),
   }
   const sender = principal(payload.sender)
   const detail = sanitizeDetail(payload.detail, fullName, pullRequestNumber)
@@ -403,6 +420,7 @@ const eventLabels: Record<string, string> = {
   pull_request_review: "Review",
   pull_request_review_comment: "Review comment",
   issue_comment: "Discussion comment",
+  issues: "Issue",
   check_run: "Check run",
   check_suite: "Check suite",
   workflow_run: "Workflow run",
@@ -504,6 +522,7 @@ function eventSummary(metadata: JsonObject): string[] {
   const repository = object(metadata.repository)!
   const pullRequest = object(metadata.pullRequest)
   const branch = object(metadata.branch)
+  const subject = object(metadata.subject)
   const detail = object(metadata.detail)
   const githubEvent = text(metadata, "githubEvent")!
   const action = text(metadata, "action")!
@@ -513,15 +532,20 @@ function eventSummary(metadata: JsonObject): string[] {
   const pullRequestUrl = text(pullRequest ?? {}, "url")
   const branchValue = text(branch ?? {}, "name")
   const branchValueUrl = text(branch ?? {}, "url")
+  const subjectKind = text(subject ?? {}, "kind")
+  const subjectNumber = positiveInteger(subject?.number)
+  const subjectUrl = text(subject ?? {}, "url")
   const actionLabel = githubEvent === "pull_request" && action === "synchronize"
     ? "updated"
     : githubEvent === "push" ? "received"
     : humanize(action)
 
   return [
-    `${eventLabels[githubEvent]} ${actionLabel} on ${pullRequestNumber ? `${fullName}#${pullRequestNumber}` : `${fullName}@${branchValue}`}${sender ? ` by @${sender}` : ""}.`,
+    `${eventLabels[githubEvent]} ${actionLabel} on ${pullRequestNumber || subjectNumber ? `${fullName}#${pullRequestNumber ?? subjectNumber}` : `${fullName}@${branchValue}`}${sender ? ` by @${sender}` : ""}.`,
     ...(detail ? detailSummary(detail, sender) : []),
-    pullRequestUrl ? `PR: ${pullRequestUrl}` : `Branch: ${branchValueUrl}`,
+    pullRequestUrl ? `PR: ${pullRequestUrl}`
+      : subjectUrl ? `${subjectKind === "pull_request" ? "PR" : "Issue"}: ${subjectUrl}`
+        : `Branch: ${branchValueUrl}`,
   ]
 }
 
@@ -630,8 +654,11 @@ function targetKey(metadata: JsonObject): string {
   const repository = object(metadata.repository)!
   const pullRequest = object(metadata.pullRequest)
   const branch = object(metadata.branch)
+  const subject = object(metadata.subject)
   const targetType = text(metadata, "targetType")!
-  return `${text(repository, "fullName")}:${targetType}:${positiveInteger(pullRequest?.number) ?? text(branch ?? {}, "name")}`
+  return `${text(repository, "fullName")}:${targetType}:${positiveInteger(pullRequest?.number)
+    ?? text(branch ?? {}, "name")
+    ?? `${text(subject ?? {}, "kind")}:${positiveInteger(subject?.number)}`}`
 }
 
 function behaviorInstruction(values: unknown[]): string {
@@ -996,6 +1023,7 @@ export default async function ampSubscribe(amp: PluginAPI) {
     amp.logger.log("amp-subscribe is disabled outside an Amp-managed orb")
     return
   }
+  const pullRequestCreateMarkers = new Map<string, string>()
   const coalescer = new GitHubEventCoalescer()
   const seen = new Set<string>()
   const executions = new Map<string, Promise<void>>()
@@ -1061,9 +1089,28 @@ export default async function ampSubscribe(amp: PluginAPI) {
     },
   })
 
+  amp.on("tool.call", (event) => {
+    const shell = amp.helpers.shellCommandFromToolCall(event)
+    if (!shell || !/gh\s+pr\s+create(?:\s|$)/.test(shell.command)) return { action: "allow" }
+    const commandKey = event.input.command === shell.command ? "command"
+      : event.input.cmd === shell.command ? "cmd"
+        : null
+    if (!commandKey) return { action: "allow" }
+    const markerPath = `/tmp/amp-subscribe-pr-create-${crypto.randomUUID()}`
+    pullRequestCreateMarkers.set(event.toolUseID, markerPath)
+    return {
+      action: "modify",
+      input: { ...event.input, [commandKey]: instrumentPullRequestCreate(shell.command, markerPath) },
+    }
+  })
+
   amp.on("tool.result", async (event, ctx) => {
-    const command = amp.helpers.shellCommandFromToolCall(event)?.command ?? null
-    const target = pullRequestFromShellResult(command, event)
+    const markerPath = pullRequestCreateMarkers.get(event.toolUseID)
+    if (!markerPath) return
+    pullRequestCreateMarkers.delete(event.toolUseID)
+    const createOutput = existsSync(markerPath) ? readFileSync(markerPath, "utf8") : null
+    rmSync(markerPath, { force: true })
+    const target = pullRequestFromCreateOutput(createOutput)
     if (!target) return
     try {
       await subscribe(
@@ -1138,7 +1185,7 @@ export default async function ampSubscribe(amp: PluginAPI) {
       properties: {
         pullRequest: { type: "string", description: "GitHub PR URL or number such as #123" },
         repository: { type: "string", description: "owner/repo; optional when a URL or GitHub origin remote is available" },
-        events: { type: "array", items: { type: "string", enum: defaultEvents }, description: "Events to subscribe to; defaults to all supported events" },
+        events: { type: "array", items: { type: "string", enum: pullRequestEvents }, description: "Events to subscribe to; defaults to all supported events" },
         behavior: { type: "string", enum: ["notify", "investigate", "implement"], description: "What the thread should do; defaults to investigate" },
       },
       required: ["pullRequest"],
@@ -1151,10 +1198,43 @@ export default async function ampSubscribe(amp: PluginAPI) {
         if (remote.exitCode === 0) repository = repositoryFromRemote(remote.stdout)
       }
       const target = parsePullRequest(pullRequest, repository)
-      const events = Array.isArray(input.events) ? input.events : defaultEvents
+      const events = Array.isArray(input.events) ? input.events : pullRequestEvents
       const behavior = typeof input.behavior === "string" ? input.behavior : "investigate"
       const subscription = await subscribe(amp, webhookUrl, { ...target, targetType: "pull_request" }, events, behavior)
       return `Subscribed this thread to ${target.repository}#${target.number} (${behavior}; ${events.join(", ")}). Subscription ID: ${subscription.id}`
+    },
+  })
+
+  amp.registerTool({
+    name: "github_repository_subscribe",
+    title: "Subscribe to repository",
+    description: "Subscribe the current orb thread to newly opened pull requests and issues in one GitHub repository.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repository: { type: "string", description: "owner/repo; optional when a GitHub origin remote is available" },
+        events: { type: "array", items: { type: "string", enum: repositoryEvents }, description: "Events to subscribe to; defaults to pull requests and issues" },
+        behavior: { type: "string", enum: ["notify", "investigate", "implement"], description: "What the thread should do; defaults to investigate" },
+      },
+    },
+    async execute(input, ctx) {
+      let repository = typeof input.repository === "string" ? input.repository.toLowerCase() : null
+      if (!repository) {
+        const remote = await amp.$`git remote get-url origin`
+        if (remote.exitCode === 0) repository = repositoryFromRemote(remote.stdout)
+      }
+      if (!repository) throw new Error("Provide repository as owner/repo, or configure a GitHub origin remote")
+      const events = Array.isArray(input.events) ? input.events : repositoryEvents
+      const behavior = typeof input.behavior === "string" ? input.behavior : "investigate"
+      const subscription = await subscribe(
+        amp,
+        webhookUrl,
+        { targetType: "repository", repository },
+        events,
+        behavior,
+      )
+      const labels = events.map((event) => event === "pull_requests" ? "pull requests" : event)
+      return `Subscribed this thread to new ${labels.join(" and ")} in ${repository} (${behavior}). Subscription ID: ${subscription.id}`
     },
   })
 
@@ -1197,7 +1277,7 @@ export default async function ampSubscribe(amp: PluginAPI) {
   amp.registerTool({
     name: "github_pr_subscriptions",
     title: "List GitHub subscriptions",
-    description: "List GitHub pull requests and branches watched by the current thread.",
+    description: "List GitHub repositories, pull requests, and branches watched by the current thread.",
     inputSchema: { type: "object", properties: {} },
     async execute(_input, ctx) {
       const response = await bridgeRequest(amp, "/api/subscriptions")
@@ -1208,7 +1288,7 @@ export default async function ampSubscribe(amp: PluginAPI) {
   amp.registerTool({
     name: "github_pr_unsubscribe",
     title: "Unsubscribe from GitHub target",
-    description: "Remove one GitHub pull request or branch subscription from the current thread by subscription ID.",
+    description: "Remove one GitHub repository, pull request, or branch subscription from the current thread by subscription ID.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string", description: "Subscription ID returned by the list or subscribe tool" } },
