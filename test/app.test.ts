@@ -174,6 +174,56 @@ describe("subscription bridge", () => {
     })
   })
 
+  test("registers a repository subscription and routes newly opened issues", async () => {
+    const app = bridge()
+    const subscriptionResponse = await app.fetch(apiRequest({
+      repository: "lox/project",
+      targetType: "repository",
+      webhookUrl: "https://hooks.example.test/secret-capability",
+      events: ["pull_requests", "issues"],
+      behavior: "notify",
+    }))
+    expect(subscriptionResponse.status).toBe(201)
+    expect(await subscriptionResponse.json()).toMatchObject({
+      subscription: { targetType: "repository", repository: "lox/project" },
+    })
+
+    const forwarded: Array<{ body: string; idempotencyKey: string | null }> = []
+    spyOn(globalThis, "fetch").mockImplementation((async (_input, init) => {
+      forwarded.push({
+        body: String(init?.body),
+        idempotencyKey: new Headers(init?.headers).get("idempotency-key"),
+      })
+      return new Response(null, { status: 202 })
+    }) as typeof fetch)
+    const body = JSON.stringify({
+      action: "opened",
+      repository: { id: 42, full_name: "lox/project" },
+      issue: { number: 23, title: "UNTRUSTED_SENTINEL", body: "UNTRUSTED_SENTINEL" },
+      sender: { login: "reporter" },
+    })
+    const response = await app.fetch(new Request("https://bridge.test/github/webhook", {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": await hmacSha256("github-secret", body),
+        "x-github-event": "issues",
+        "x-github-delivery": "delivery-issue",
+      },
+      body,
+    }))
+    expect(response.status).toBe(202)
+    expect(forwarded).toHaveLength(1)
+    expect(forwarded[0]?.idempotencyKey).toBe("delivery-issue:issues:42:repository")
+    expect(JSON.parse(forwarded[0]!.body)).toMatchObject({
+      githubEvent: "issues",
+      event: "issues",
+      targetType: "repository",
+      subject: { kind: "issue", number: 23, url: "https://github.com/lox/project/issues/23" },
+      behavior: "notify",
+    })
+    expect(forwarded[0]?.body).not.toContain("UNTRUSTED_SENTINEL")
+  })
+
   test("rejects pull-request-only events for a branch", async () => {
     const response = await bridge().fetch(apiRequest({
       repository: "lox/project",
@@ -185,6 +235,33 @@ describe("subscription bridge", () => {
     }))
     expect(response.status).toBe(400)
     expect(await response.json()).toEqual({ error: "branch subscriptions support only commits and checks" })
+  })
+
+  test("rejects lifecycle events for a repository subscription", async () => {
+    const response = await bridge().fetch(apiRequest({
+      repository: "lox/project",
+      targetType: "repository",
+      webhookUrl: "https://hooks.example.test/secret-capability",
+      events: ["reviews"],
+      behavior: "notify",
+    }))
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: "repository subscriptions support only pull_requests and issues",
+    })
+  })
+
+  test("rejects issue events for a pull request subscription", async () => {
+    const response = await bridge().fetch(apiRequest({
+      repository: "lox/project",
+      targetType: "pull_request",
+      pullRequestNumber: 17,
+      webhookUrl: "https://hooks.example.test/secret-capability",
+      events: ["issues"],
+      behavior: "notify",
+    }))
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ error: "pull request subscriptions do not support issues" })
   })
 
   test("rejects branch names containing prompt-shaping Unicode", async () => {

@@ -9,7 +9,7 @@ interface SubscriptionRow {
   thread_id: string
   repository: string
   pull_request_number: number | null
-  target_type: "pull_request" | "branch" | null
+  target_type: "pull_request" | "branch" | "repository" | null
   target: string | null
   webhook_url: string
   events: string
@@ -51,9 +51,11 @@ function mapSubscription(row: SubscriptionRow): Subscription {
     behavior: row.behavior,
     createdAt: row.created_at,
   }
-  return row.target_type === "branch" && row.target
-    ? { ...common, targetType: "branch", branch: row.target }
-    : { ...common, targetType: "pull_request", pullRequestNumber: row.pull_request_number ?? Number(row.target) }
+  if (row.target_type === "branch" && row.target) {
+    return { ...common, targetType: "branch", branch: row.target }
+  }
+  if (row.target_type === "repository") return { ...common, targetType: "repository" }
+  return { ...common, targetType: "pull_request", pullRequestNumber: row.pull_request_number ?? Number(row.target) }
 }
 
 export class SubscriptionDatabase {
@@ -67,13 +69,17 @@ export class SubscriptionDatabase {
     const legacy = columns.some((column) => column.name === "pull_request_number")
       && !columns.some((column) => column.name === "target_type")
     if (legacy) this.migratePullRequestSubscriptions()
+    const schema = this.sqlite.query<{ sql: string }, []>(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'subscriptions'
+    `).get()?.sql
+    if (schema && !schema.includes("'repository'")) this.migrateRepositorySubscriptions()
     this.sqlite.exec(`
       CREATE TABLE IF NOT EXISTS subscriptions (
         id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL,
         repository TEXT NOT NULL,
         pull_request_number INTEGER,
-        target_type TEXT CHECK(target_type IN ('pull_request', 'branch')),
+        target_type TEXT CHECK(target_type IN ('pull_request', 'branch', 'repository')),
         target TEXT,
         webhook_url TEXT NOT NULL,
         events TEXT NOT NULL,
@@ -123,7 +129,7 @@ export class SubscriptionDatabase {
           thread_id TEXT NOT NULL,
           repository TEXT NOT NULL,
           pull_request_number INTEGER,
-          target_type TEXT CHECK(target_type IN ('pull_request', 'branch')),
+          target_type TEXT CHECK(target_type IN ('pull_request', 'branch', 'repository')),
           target TEXT,
           webhook_url TEXT NOT NULL,
           events TEXT NOT NULL,
@@ -154,8 +160,47 @@ export class SubscriptionDatabase {
     this.sqlite.exec("PRAGMA foreign_keys = ON")
   }
 
+  private migrateRepositorySubscriptions(): void {
+    this.sqlite.exec("PRAGMA foreign_keys = OFF")
+    this.sqlite.transaction(() => {
+      this.sqlite.exec(`
+        ALTER TABLE deliveries RENAME TO deliveries_before_repository_targets;
+        ALTER TABLE subscriptions RENAME TO subscriptions_before_repository_targets;
+        CREATE TABLE subscriptions (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          repository TEXT NOT NULL,
+          pull_request_number INTEGER,
+          target_type TEXT CHECK(target_type IN ('pull_request', 'branch', 'repository')),
+          target TEXT,
+          webhook_url TEXT NOT NULL,
+          events TEXT NOT NULL,
+          behavior TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(thread_id, repository, target_type, target),
+          UNIQUE(thread_id, repository, pull_request_number)
+        );
+        CREATE TABLE deliveries (
+          subscription_id TEXT NOT NULL,
+          delivery_id TEXT NOT NULL,
+          event TEXT NOT NULL,
+          delivered_at TEXT NOT NULL,
+          PRIMARY KEY(subscription_id, delivery_id, event),
+          FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
+        );
+        INSERT INTO subscriptions SELECT * FROM subscriptions_before_repository_targets;
+        INSERT INTO deliveries SELECT * FROM deliveries_before_repository_targets;
+        DROP TABLE deliveries_before_repository_targets;
+        DROP TABLE subscriptions_before_repository_targets;
+      `)
+    })()
+    this.sqlite.exec("PRAGMA foreign_keys = ON")
+  }
+
   upsert(input: SubscriptionInput): Subscription {
-    const target = input.targetType === "pull_request" ? String(input.pullRequestNumber) : input.branch
+    const target = input.targetType === "pull_request" ? String(input.pullRequestNumber)
+      : input.targetType === "branch" ? input.branch
+        : "*"
     const pullRequestNumber = input.targetType === "pull_request" ? input.pullRequestNumber : null
     const existing = this.sqlite.query<SubscriptionRow, [string, string, string, string, string, string]>(`
       SELECT * FROM subscriptions
@@ -167,9 +212,7 @@ export class SubscriptionDatabase {
       id: existing?.id ?? crypto.randomUUID(),
       createdAt: existing?.created_at ?? new Date().toISOString(),
     }
-    const subscription: Subscription = input.targetType === "pull_request"
-      ? { ...input, ...stored }
-      : { ...input, ...stored }
+    const subscription: Subscription = { ...input, ...stored }
     if (existing) {
       this.sqlite.query(`
         UPDATE subscriptions SET

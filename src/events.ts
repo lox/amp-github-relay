@@ -334,17 +334,36 @@ export function normalizeGitHubEvent(
       },
     }]
   })
+  const repositoryEvents: RoutedEvent[] = []
+  if (action === "opened" && (eventName === "pull_request" || eventName === "issues")) {
+    const subject = object(eventName === "pull_request" ? root.pull_request : root.issue)
+    const subjectNumber = positiveNumber(subject?.number)
+    if (subjectNumber) {
+      const kind = eventName === "pull_request" ? "pull_request" as const : "issue" as const
+      repositoryEvents.push({
+        ...common,
+        event: eventName === "pull_request" ? "pull_requests" : "issues",
+        targetType: "repository",
+        subject: {
+          kind,
+          number: subjectNumber,
+          url: `https://github.com/${fullName}/${kind === "pull_request" ? "pull" : "issues"}/${subjectNumber}`,
+        },
+      })
+    }
+  }
   const branch = branchFor(eventName, root, repositoryId)
   const branchEvent = eventName === "push" ? "commits"
     : eventName === "check_run" || eventName === "check_suite" || eventName === "workflow_run" ? "checks"
       : null
   return branch && branchEvent ? [
     ...pullRequestEvents,
+    ...repositoryEvents,
     {
       ...common,
       event: branchEvent,
       targetType: "branch",
       branch: { name: branch, url: branchUrl(fullName, branch) },
     },
-  ] : pullRequestEvents
+  ] : [...pullRequestEvents, ...repositoryEvents]
 }

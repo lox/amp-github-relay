@@ -24,6 +24,7 @@ describe("GitHub App setup", () => {
       default_events: [
         "push",
         "pull_request",
+        "issues",
         "pull_request_review",
         "pull_request_review_comment",
         "issue_comment",

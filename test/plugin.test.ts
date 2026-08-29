@@ -178,6 +178,43 @@ describe("eventPrompt", () => {
     expect(prompt).toContain("Branch: https://github.com/lox/project/tree/main")
   })
 
+  test("renders repository-level pull request and issue events", () => {
+    const issuePrompt = eventPrompt({
+      ...baseEvent,
+      githubEvent: "issues",
+      event: "issues",
+      action: "opened",
+      targetType: "repository",
+      pullRequest: undefined,
+      subject: { kind: "issue", number: 23, url: "https://github.com/lox/project/issues/23" },
+    })
+    expect(issuePrompt).toContain("Issue opened on lox/project#23 by @reviewer.")
+    expect(issuePrompt).toContain("Issue: https://github.com/lox/project/issues/23")
+
+    const pullRequestPrompt = eventPrompt({
+      ...baseEvent,
+      githubEvent: "pull_request",
+      event: "pull_requests",
+      action: "opened",
+      targetType: "repository",
+      pullRequest: undefined,
+      subject: { kind: "pull_request", number: 24, url: "https://github.com/lox/project/pull/24" },
+      detail: { kind: "pull_request", state: "open" },
+    })
+    expect(pullRequestPrompt).toContain("Pull request opened on lox/project#24 by @reviewer.")
+    expect(pullRequestPrompt).toContain("PR: https://github.com/lox/project/pull/24")
+
+    expect(() => eventPrompt({
+      ...baseEvent,
+      githubEvent: "issues",
+      event: "issues",
+      action: "edited",
+      targetType: "repository",
+      pullRequest: undefined,
+      subject: { kind: "issue", number: 23, url: "https://github.com/lox/project/issues/23" },
+    })).toThrow("Rejected malformed GitHub event")
+  })
+
   test("renders schema version 1 events without detail", () => {
     const prompt = eventPrompt(baseEvent)
     expect(prompt).toContain("Review submitted on lox/project#17 by @reviewer.")
