@@ -1,7 +1,7 @@
 import type { PluginAPI } from "@ampcode/plugin"
 import { existsSync, readFileSync, rmSync } from "node:fs"
 
-// Keep this filename stable: Amp durable webhook identity is scoped to the plugin and thread.
+// Keep subscribe.ts stable: Amp durable webhook identity is scoped to the plugin and thread.
 export const description = "Lets an Amp thread subscribe to GitHub repositories, pull requests, branches, and RSS or Atom feeds."
 
 const pullRequestEvents = [

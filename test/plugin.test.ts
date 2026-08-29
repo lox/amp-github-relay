@@ -10,7 +10,7 @@ import ampSubscribe, {
   GitHubEventCoalescer,
   instrumentPullRequestCreate,
   pullRequestFromCreateOutput,
-} from "../plugin/github-relay"
+} from "../plugin/subscribe"
 
 describe("bridgeConfiguration", () => {
   test("keeps the legacy audience for a legacy self-hosted URL", () => {
