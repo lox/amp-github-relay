@@ -89,10 +89,8 @@ installing `subscribe.ts`.
 - `investigate` (default): inspect and explain the event without changing external state.
 - `implement`: make and verify local changes, but do not push without permission.
 
-When Amp creates a PR directly with `gh pr create`, the plugin automatically watches commits,
-reviews, comments, checks, merge, and close events in `investigate` mode. Explicit subscriptions
-still default to every supported event. You can also ask Amp to list or remove this thread's
-subscriptions.
+Pull requests are watched only when you explicitly ask Amp to subscribe. Explicit subscriptions
+default to every supported event. You can also ask Amp to list or remove this thread's subscriptions.
 
 ## How it works
 

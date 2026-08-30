@@ -1,5 +1,4 @@
 import type { PluginAPI } from "@ampcode/plugin"
-import { existsSync, readFileSync, rmSync } from "node:fs"
 
 // Keep subscribe.ts stable: Amp durable webhook identity is scoped to the plugin and thread.
 export const description = "Lets an Amp thread subscribe to GitHub repositories, pull requests, branches, and RSS or Atom feeds."
@@ -16,15 +15,6 @@ const pullRequestEvents = [
 ]
 const repositoryEvents = ["pull_requests", "issues"]
 const supportedEvents = [...pullRequestEvents, "issues"]
-const automaticPullRequestEvents = [
-  "commits",
-  "reviews",
-  "review_comments",
-  "discussion_comments",
-  "checks",
-  "merged",
-  "closed",
-]
 const defaultBranchEvents = ["commits", "checks"]
 
 type SubscriptionTarget =
@@ -118,24 +108,6 @@ async function subscribeToFeed(
   })
   const result = await response.json() as { subscription: { id: string } }
   return result.subscription
-}
-
-export function pullRequestFromCreateOutput(output: string | null): { repository: string; number: number } | null {
-  if (output === null) return null
-  const targets = new Map<string, { repository: string; number: number }>()
-  for (const line of output.split("\n")) {
-    try {
-      const target = parsePullRequest(line.trim(), null)
-      targets.set(`${target.repository}#${target.number}`, target)
-    } catch {
-      // Ignore output lines that are not exact GitHub pull request URLs.
-    }
-  }
-  return targets.size === 1 ? [...targets.values()][0] : null
-}
-
-export function instrumentPullRequestCreate(command: string, markerPath: string): string {
-  return `(\ngh() {\n  if [[ "$1" == pr && "$2" == create ]]; then\n    local output status\n    output=$(command gh "$@")\n    status=$?\n    if [[ -n "$output" ]]; then printf '%s\\n' "$output"; fi\n    if [[ $status -eq 0 ]]; then printf '%s\\n' "$output" >> "${markerPath}"; fi\n    return "$status"\n  fi\n  command gh "$@"\n}\n${command}\n)`
 }
 
 type JsonObject = Record<string, unknown>
@@ -1023,7 +995,6 @@ export default async function ampSubscribe(amp: PluginAPI) {
     amp.logger.log("amp-subscribe is disabled outside an Amp-managed orb")
     return
   }
-  const pullRequestCreateMarkers = new Map<string, string>()
   const coalescer = new GitHubEventCoalescer()
   const seen = new Set<string>()
   const executions = new Map<string, Promise<void>>()
@@ -1089,43 +1060,6 @@ export default async function ampSubscribe(amp: PluginAPI) {
     },
   })
 
-  amp.on("tool.call", (event) => {
-    const shell = amp.helpers.shellCommandFromToolCall(event)
-    if (!shell || !/gh\s+pr\s+create(?:\s|$)/.test(shell.command)) return { action: "allow" }
-    const commandKey = event.input.command === shell.command ? "command"
-      : event.input.cmd === shell.command ? "cmd"
-        : null
-    if (!commandKey) return { action: "allow" }
-    const markerPath = `/tmp/amp-subscribe-pr-create-${crypto.randomUUID()}`
-    pullRequestCreateMarkers.set(event.toolUseID, markerPath)
-    return {
-      action: "modify",
-      input: { ...event.input, [commandKey]: instrumentPullRequestCreate(shell.command, markerPath) },
-    }
-  })
-
-  amp.on("tool.result", async (event, ctx) => {
-    const markerPath = pullRequestCreateMarkers.get(event.toolUseID)
-    if (!markerPath) return
-    pullRequestCreateMarkers.delete(event.toolUseID)
-    const createOutput = existsSync(markerPath) ? readFileSync(markerPath, "utf8") : null
-    rmSync(markerPath, { force: true })
-    const target = pullRequestFromCreateOutput(createOutput)
-    if (!target) return
-    try {
-      await subscribe(
-        amp,
-        webhookUrl,
-        { ...target, targetType: "pull_request" },
-        automaticPullRequestEvents,
-        "investigate",
-      )
-      await ctx.ui.notify(`Subscribed this thread to ${target.repository}#${target.number}.`).catch(() => undefined)
-    } catch (error) {
-      ctx.logger.log("Automatic pull request subscription failed", error)
-    }
-  })
-
   amp.registerTool({
     name: "feed_subscribe",
     title: "Subscribe to RSS or Atom feed",
@@ -1179,7 +1113,7 @@ export default async function ampSubscribe(amp: PluginAPI) {
   amp.registerTool({
     name: "github_pr_subscribe",
     title: "Subscribe to pull request",
-    description: "Subscribe the current orb thread to one GitHub pull request. Use when the user asks to watch a PR, or after creating one when automatic subscription did not occur, especially after async_shell_command completion.",
+    description: "Subscribe the current orb thread to one GitHub pull request when the user explicitly asks to watch it.",
     inputSchema: {
       type: "object",
       properties: {
