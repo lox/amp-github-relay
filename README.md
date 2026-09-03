@@ -166,7 +166,8 @@ The bridge exposes Prometheus-format metrics (subscription counts, webhook deliv
 results, and more) on `GET /metrics`, served on a separate port (`METRICS_PORT`, default `9091`) so it
 isn't reachable from the public internet. On Fly.io, the included `fly.toml` configures Fly's
 [custom metrics scraping](https://fly.io/docs/reference/metrics/#custom-metrics) to pick this up
-automatically.
+automatically. A ready-to-import Grafana dashboard for these metrics lives in
+[`dashboards/`](dashboards/README.md).
 
 The included `fly.toml` shows one Fly.io deployment. Before deploying a copy, change its app name,
 region, and OIDC audience, then create the app and set its secrets:
