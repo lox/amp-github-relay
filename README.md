@@ -162,6 +162,12 @@ mise exec -- bun run start
 
 Use `GET /healthz` as its health check and keep `DATABASE_PATH` on persistent storage in production.
 
+The bridge exposes Prometheus-format metrics (subscription counts, webhook delivery outcomes, feed poll
+results, and more) on `GET /metrics`, served on a separate port (`METRICS_PORT`, default `9091`) so it
+isn't reachable from the public internet. On Fly.io, the included `fly.toml` configures Fly's
+[custom metrics scraping](https://fly.io/docs/reference/metrics/#custom-metrics) to pick this up
+automatically.
+
 The included `fly.toml` shows one Fly.io deployment. Before deploying a copy, change its app name,
 region, and OIDC audience, then create the app and set its secrets:
 
