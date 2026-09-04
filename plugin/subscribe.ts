@@ -1,7 +1,7 @@
-import type { PluginAPI } from "@ampcode/plugin"
+import type { PluginAPI, ThreadID } from "@ampcode/plugin"
 import { existsSync, readFileSync, rmSync } from "node:fs"
 
-// Keep subscribe.ts stable: Amp durable webhook identity is scoped to the plugin and thread.
+// Keep subscribe.ts stable: Amp includes the plugin identity in durable webhook URLs.
 export const description = "Lets an Amp thread subscribe to GitHub repositories, pull requests, branches, and RSS or Atom feeds."
 
 const pullRequestEvents = [
@@ -157,6 +157,17 @@ function enumValue<const T extends readonly string[]>(value: unknown, values: T)
 
 function matchingString(value: unknown, pattern: RegExp, maximumLength: number): string | undefined {
   return typeof value === "string" && value.length <= maximumLength && pattern.test(value) ? value : undefined
+}
+
+function threadID(value: unknown): ThreadID | undefined {
+  const id = matchingString(value, /^T-[A-Za-z0-9][A-Za-z0-9-]*$/, 128)
+  return id as ThreadID | undefined
+}
+
+function targetThreadID(value: unknown): ThreadID {
+  const id = threadID(object(value)?.targetThreadID)
+  if (!id) throw new Error("Rejected missing or malformed target thread ID")
+  return id
 }
 
 function branchName(value: unknown): string | undefined {
@@ -368,6 +379,7 @@ function promptMetadata(payload: JsonObject): JsonObject {
     ? `https://github.com/${fullName}/${subjectKind === "pull_request" ? "pull" : "issues"}/${subjectNumber}`
     : undefined
   const pullRequestHeadSha = sha(pullRequest?.headSha)
+  const targetThread = threadID(payload.targetThreadID)
   const targetType = enumValue(payload.targetType, ["pull_request", "branch", "repository"] as const)
     ?? (pullRequest ? "pull_request" : undefined)
   const validTarget = targetType === "pull_request"
@@ -385,6 +397,7 @@ function promptMetadata(payload: JsonObject): JsonObject {
       : githubEvent !== "push" && githubEvent !== "issues"
   if (payload.schemaVersion !== 1 || !deliveryId || !githubEvent || !event || !action
     || !repositoryId || !fullName || !validTarget || !validEventTarget
+    || (payload.targetThreadID !== undefined && !targetThread)
     || !eventMatchesGitHubEvent(githubEvent, event, action)) {
     throw new Error("Rejected malformed GitHub event")
   }
@@ -395,6 +408,7 @@ function promptMetadata(payload: JsonObject): JsonObject {
     event,
     action,
     targetType,
+    ...(targetThread ? { targetThreadID: targetThread } : {}),
     repository: { id: repositoryId, fullName },
     ...(targetType === "pull_request"
       ? { pullRequest: {
@@ -656,7 +670,7 @@ function targetKey(metadata: JsonObject): string {
   const branch = object(metadata.branch)
   const subject = object(metadata.subject)
   const targetType = text(metadata, "targetType")!
-  return `${text(repository, "fullName")}:${targetType}:${positiveInteger(pullRequest?.number)
+  return `${text(metadata, "targetThreadID") ?? "legacy"}:${text(repository, "fullName")}:${targetType}:${positiveInteger(pullRequest?.number)
     ?? text(branch ?? {}, "name")
     ?? `${text(subject ?? {}, "kind")}:${positiveInteger(subject?.number)}`}`
 }
@@ -1045,8 +1059,9 @@ export default async function ampSubscribe(amp: PluginAPI) {
       }
       const execution = (async () => {
         const payload = JSON.parse(new TextDecoder().decode(event.body)) as unknown
+        const targetThread = amp.threads.get(targetThreadID(payload))
         if (object(payload)?.source === "feed") {
-          await ctx.thread.appendUserMessage(
+          await targetThread.appendUserMessage(
             { type: "user-message", content: feedPrompt(payload) },
             { steer: true },
           )
@@ -1059,7 +1074,7 @@ export default async function ampSubscribe(amp: PluginAPI) {
           })
         } else {
           const result = await coalescer.handle(payload, async (delivery) => {
-            await ctx.thread.appendUserMessage(
+            await targetThread.appendUserMessage(
               { type: "user-message", content: delivery.content },
               { steer: delivery.urgent },
             )

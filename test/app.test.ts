@@ -8,7 +8,12 @@ const config = {
   allowedWebhookHosts: ["example.test"],
   authenticate: async (request: Request) => {
     if (request.headers.get("authorization") !== "Bearer oidc-token") throw new Error("unauthorized")
-    return { threadId: "T-test", workspaceId: "W-test", projectId: "P-test", userId: "U-test" }
+    return {
+      threadId: request.headers.get("x-test-thread-id") ?? "T-test",
+      workspaceId: "W-test",
+      projectId: "P-test",
+      userId: "U-test",
+    }
   },
 }
 
@@ -25,18 +30,26 @@ function bridge() {
   return instance
 }
 
-function apiRequest(body: unknown, method = "POST") {
+function apiRequest(body: unknown, method = "POST", threadID?: string) {
   return new Request("https://bridge.test/api/subscriptions", {
     method,
-    headers: { authorization: "Bearer oidc-token", "content-type": "application/json" },
+    headers: {
+      authorization: "Bearer oidc-token",
+      "content-type": "application/json",
+      ...(threadID ? { "x-test-thread-id": threadID } : {}),
+    },
     body: method === "GET" ? undefined : JSON.stringify(body),
   })
 }
 
-function feedApiRequest(body: unknown, method = "POST") {
+function feedApiRequest(body: unknown, method = "POST", threadID?: string) {
   return new Request("https://bridge.test/api/feed-subscriptions", {
     method,
-    headers: { authorization: "Bearer oidc-token", "content-type": "application/json" },
+    headers: {
+      authorization: "Bearer oidc-token",
+      "content-type": "application/json",
+      ...(threadID ? { "x-test-thread-id": threadID } : {}),
+    },
     body: method === "GET" ? undefined : JSON.stringify(body),
   })
 }
@@ -63,16 +76,18 @@ describe("subscription bridge", () => {
     expect(app.database.list("T-attacker-controlled")).toHaveLength(0)
   })
 
-  test("verifies, routes, and deduplicates a GitHub delivery", async () => {
+  test("routes and deduplicates shared-webhook GitHub subscriptions by authenticated thread", async () => {
     const app = bridge()
-    await app.fetch(apiRequest({
-      threadId: "T-test",
-      repository: "lox/project",
-      pullRequestNumber: 17,
-      webhookUrl: "https://hooks.example.test/secret-capability",
-      events: ["reviews"],
-      behavior: "investigate",
-    }))
+    for (const threadID of ["T-thread-one", "T-thread-two"]) {
+      await app.fetch(apiRequest({
+        targetThreadID: "T-attacker-controlled",
+        repository: "lox/project",
+        pullRequestNumber: 17,
+        webhookUrl: "https://hooks.example.test/secret-capability",
+        events: ["reviews"],
+        behavior: "investigate",
+      }, "POST", threadID))
+    }
     const forwarded: Array<{ body: string; idempotencyKey: string | null }> = []
     const fetchSpy = spyOn(globalThis, "fetch")
     fetchSpy.mockImplementation((async (_input, init) => {
@@ -107,20 +122,26 @@ describe("subscription bridge", () => {
 
     expect((await request()).status).toBe(202)
     expect((await request()).status).toBe(202)
-    expect(forwarded).toHaveLength(1)
-    expect(forwarded[0]?.idempotencyKey).toBe("delivery-1:reviews:42:17")
-    expect(JSON.parse(forwarded[0]!.body)).toMatchObject({
-      schemaVersion: 1,
-      behavior: "investigate",
-      detail: {
-        kind: "pull_request_review",
-        id: 91,
-        url: "https://github.com/lox/project/pull/17#pullrequestreview-91",
-        state: "approved",
-        author: "reviewer",
-      },
-    })
-    expect(forwarded[0]?.body).not.toContain("UNTRUSTED_SENTINEL")
+    expect(forwarded).toHaveLength(2)
+    expect(forwarded.map(({ body: forwardedBody }) => JSON.parse(forwardedBody).targetThreadID).sort())
+      .toEqual(["T-thread-one", "T-thread-two"])
+    expect(new Set(forwarded.map(({ idempotencyKey }) => idempotencyKey)).size).toBe(2)
+    for (const delivery of forwarded) {
+      expect(delivery.idempotencyKey).toMatch(/^delivery-1:reviews:42:17:[0-9a-f-]+$/)
+      expect(JSON.parse(delivery.body)).toMatchObject({
+        schemaVersion: 1,
+        behavior: "investigate",
+        detail: {
+          kind: "pull_request_review",
+          id: 91,
+          url: "https://github.com/lox/project/pull/17#pullrequestreview-91",
+          state: "approved",
+          author: "reviewer",
+        },
+      })
+      expect(delivery.body).not.toContain("UNTRUSTED_SENTINEL")
+      expect(delivery.body).not.toContain("T-attacker-controlled")
+    }
   })
 
   test("registers and routes a branch subscription", async () => {
@@ -164,7 +185,7 @@ describe("subscription bridge", () => {
     }))
     expect(response.status).toBe(202)
     expect(forwarded).toHaveLength(1)
-    expect(forwarded[0]?.idempotencyKey).toBe("delivery-branch:commits:42:branch:main")
+    expect(forwarded[0]?.idempotencyKey).toMatch(/^delivery-branch:commits:42:branch:main:[0-9a-f-]+$/)
     expect(JSON.parse(forwarded[0]!.body)).toMatchObject({
       githubEvent: "push",
       event: "commits",
@@ -213,7 +234,7 @@ describe("subscription bridge", () => {
     }))
     expect(response.status).toBe(202)
     expect(forwarded).toHaveLength(1)
-    expect(forwarded[0]?.idempotencyKey).toBe("delivery-issue:issues:42:repository")
+    expect(forwarded[0]?.idempotencyKey).toMatch(/^delivery-issue:issues:42:repository:[0-9a-f-]+$/)
     expect(JSON.parse(forwarded[0]!.body)).toMatchObject({
       githubEvent: "issues",
       event: "issues",
@@ -290,7 +311,7 @@ describe("subscription bridge", () => {
     expect(response.status).toBe(401)
   })
 
-  test("baselines a feed, then routes only new or updated entries", async () => {
+  test("routes shared-webhook feed subscriptions by authenticated thread", async () => {
     const baseline = {
       id: "incident-1",
       fingerprint: "version-1",
@@ -321,13 +342,16 @@ describe("subscription bridge", () => {
       }),
     })
     openBridges.push(app)
-    const response = await app.fetch(feedApiRequest({
-      feedUrl: "https://status.example/feed.atom",
-      webhookUrl: "https://hooks.example.test/secret-capability",
-      behavior: "notify",
-    }))
-    expect(response.status).toBe(201)
-    expect(await response.text()).not.toContain("secret-capability")
+    for (const threadID of ["T-thread-one", "T-thread-two"]) {
+      const response = await app.fetch(feedApiRequest({
+        targetThreadID: "T-attacker-controlled",
+        feedUrl: "https://status.example/feed.atom",
+        webhookUrl: "https://hooks.example.test/secret-capability",
+        behavior: "notify",
+      }, "POST", threadID))
+      expect(response.status).toBe(201)
+      expect(await response.text()).not.toContain("secret-capability")
+    }
 
     const forwarded: Array<{ body: string; idempotencyKey: string | null }> = []
     spyOn(globalThis, "fetch").mockImplementation((async (_input, init) => {
@@ -338,9 +362,12 @@ describe("subscription bridge", () => {
       return new Response(null, { status: 202 })
     }) as typeof fetch)
     polled = true
-    expect(await app.pollFeeds()).toMatchObject({ checked: 1, delivered: 2, failed: 0 })
-    expect(await app.pollFeeds()).toMatchObject({ checked: 1, delivered: 0, failed: 0 })
-    expect(forwarded).toHaveLength(2)
+    expect(await app.pollFeeds()).toMatchObject({ checked: 2, delivered: 4, failed: 0 })
+    expect(await app.pollFeeds()).toMatchObject({ checked: 2, delivered: 0, failed: 0 })
+    expect(forwarded).toHaveLength(4)
+    expect(forwarded.map(({ body }) => JSON.parse(body).targetThreadID).sort())
+      .toEqual(["T-thread-one", "T-thread-one", "T-thread-two", "T-thread-two"])
+    expect(new Set(forwarded.map(({ idempotencyKey }) => idempotencyKey)).size).toBe(4)
     expect(JSON.parse(forwarded[0]!.body)).toMatchObject({
       source: "feed",
       feed: { title: "Service status", url: "https://status.example/feed.atom" },
@@ -348,6 +375,7 @@ describe("subscription bridge", () => {
       behavior: "notify",
     })
     expect(forwarded[0]?.idempotencyKey).toContain("new-entry")
+    expect(forwarded.every(({ body }) => !body.includes("T-attacker-controlled"))).toBe(true)
   })
 
   test("drops check lifecycle noise before consuming durable webhook capacity", async () => {
