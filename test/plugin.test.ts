@@ -153,7 +153,16 @@ type CapturedWebhookHandler = (event: {
   signal: AbortSignal
 }) => void | Promise<void>
 
-async function captureWebhookHandler(): Promise<CapturedWebhookHandler> {
+type CapturedAppendUserMessage = (
+  threadID: string,
+  message: unknown,
+  options: { steer?: boolean },
+) => Promise<void>
+
+async function captureWebhookHandler(
+  appendUserMessage: CapturedAppendUserMessage = async () => undefined,
+  stateGet: () => Promise<string> = async () => "running",
+): Promise<CapturedWebhookHandler> {
   let handler: CapturedWebhookHandler | undefined
   const previousOrb = process.env.AMP_ORB
   process.env.AMP_ORB = "1"
@@ -164,6 +173,14 @@ async function captureWebhookHandler(): Promise<CapturedWebhookHandler> {
       createWebhook: async (options: { handler: CapturedWebhookHandler }) => {
         handler = options.handler
         return { url: "https://hooks.example.test/github" }
+      },
+      threads: {
+        get: (threadID: string) => ({
+          id: threadID,
+          appendUserMessage: (message: unknown, options: { steer?: boolean }) =>
+            appendUserMessage(threadID, message, options),
+          state: { get: stateGet },
+        }),
       },
       on: () => undefined,
       registerTool: () => undefined,
@@ -177,15 +194,10 @@ async function captureWebhookHandler(): Promise<CapturedWebhookHandler> {
   return handler
 }
 
-function webhookInvocation(
-  id: string,
-  appendUserMessage: CapturedWebhookHandler extends (event: infer _, context: infer C) => unknown
-    ? C extends { thread: { appendUserMessage: infer A } } ? A : never
-    : never,
-  stateGet: () => Promise<string> = async () => "running",
-) {
+function webhookInvocation(id: string) {
   const routineEvent = {
     ...baseEvent,
+    targetThreadID: "T-target-thread",
     githubEvent: "pull_request",
     event: "pull_requests",
     action: "opened",
@@ -194,7 +206,10 @@ function webhookInvocation(
   return {
     event: { id, body: new TextEncoder().encode(JSON.stringify(routineEvent)) },
     context: {
-      thread: { appendUserMessage, state: { get: stateGet } },
+      thread: {
+        appendUserMessage: async () => { throw new Error("must not append through registration owner") },
+        state: { get: async () => "running" },
+      },
       logger: { log: () => undefined },
       signal: new AbortController().signal,
     },
@@ -490,17 +505,16 @@ describe("feedPrompt", () => {
 
 describe("webhook handler delivery", () => {
   test("appends without waiting for thread-state telemetry", async () => {
-    const handler = await captureWebhookHandler()
     let stateReads = 0
     let steer: boolean | undefined
-    const invocation = webhookInvocation(
-      "amp-event-1",
-      async (_message, options) => { steer = options.steer },
-      () => {
+    const handler = await captureWebhookHandler(
+      async (_threadID, _message, options) => { steer = options.steer },
+      async () => {
         stateReads += 1
         return new Promise<string>(() => undefined)
       },
     )
+    const invocation = webhookInvocation("amp-event-1")
     const completed = await Promise.race([
       Promise.resolve(handler(invocation.event, invocation.context)).then(() => true),
       Bun.sleep(50).then(() => false),
@@ -510,46 +524,74 @@ describe("webhook handler delivery", () => {
     expect(steer).toBe(false)
   })
 
-  test("delivers feed events without passing them through GitHub coalescing", async () => {
-    const handler = await captureWebhookHandler()
+  test("routes shared-webhook feed events without passing them through GitHub coalescing", async () => {
     const messages: unknown[] = []
-    let steer: boolean | undefined
-    const invocation = webhookInvocation("feed-event-1", async (message, options) => {
+    const deliveredThreadIDs: string[] = []
+    const steering: Array<boolean | undefined> = []
+    const handler = await captureWebhookHandler(async (threadID, message, options) => {
+      deliveredThreadIDs.push(threadID)
       messages.push(message)
-      steer = options.steer
+      steering.push(options.steer)
     })
-    invocation.event.body = new TextEncoder().encode(JSON.stringify({
-      schemaVersion: 1,
-      source: "feed",
-      feed: { title: "Namespace status", url: "https://namespace-status.com/feed.rss" },
-      entry: {
-        id: "incident-1",
-        title: "Queue delays",
-        url: "https://namespace-status.com/incidents/1",
-        publishedAt: null,
-        updatedAt: "2026-08-25T10:20:30.000Z",
-      },
-      behavior: "notify",
-    }))
+    for (const [index, targetThreadID] of ["T-feed-one", "T-feed-two"].entries()) {
+      const invocation = webhookInvocation(`feed-event-${index}`)
+      invocation.event.body = new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 1,
+        source: "feed",
+        targetThreadID,
+        feed: { title: "Namespace status", url: "https://namespace-status.com/feed.rss" },
+        entry: {
+          id: "incident-1",
+          title: "Queue delays",
+          url: "https://namespace-status.com/incidents/1",
+          publishedAt: null,
+          updatedAt: "2026-08-25T10:20:30.000Z",
+        },
+        behavior: "notify",
+      }))
+      await handler(invocation.event, invocation.context)
+    }
 
-    await handler(invocation.event, invocation.context)
+    expect(messages).toHaveLength(2)
+    expect(messages.every((message) => JSON.stringify(message).includes("RSS/Atom feed update"))).toBe(true)
+    expect(deliveredThreadIDs).toEqual(["T-feed-one", "T-feed-two"])
+    expect(steering).toEqual([true, true])
+  })
 
-    expect(messages).toHaveLength(1)
-    expect(messages[0]).toMatchObject({
-      type: "user-message",
-      content: expect.stringContaining("RSS/Atom feed update"),
-    })
-    expect(steer).toBe(true)
+  test("routes equivalent GitHub events on a shared webhook to their target threads", async () => {
+    const delivered: string[] = []
+    const handler = await captureWebhookHandler(async (threadID) => { delivered.push(threadID) })
+    for (const [index, threadID] of ["T-thread-one", "T-thread-two"].entries()) {
+      const invocation = webhookInvocation(`github-event-${index}`)
+      const payload = JSON.parse(new TextDecoder().decode(invocation.event.body))
+      invocation.event.body = new TextEncoder().encode(JSON.stringify({ ...payload, targetThreadID: threadID }))
+      await handler(invocation.event, invocation.context)
+    }
+
+    expect(delivered).toEqual(["T-thread-one", "T-thread-two"])
+  })
+
+  test("rejects payloads without a bridge-provided target thread", async () => {
+    let appendCalls = 0
+    const handler = await captureWebhookHandler(async () => { appendCalls += 1 })
+    const invocation = webhookInvocation("legacy-event")
+    const payload = JSON.parse(new TextDecoder().decode(invocation.event.body))
+    delete payload.targetThreadID
+    invocation.event.body = new TextEncoder().encode(JSON.stringify(payload))
+
+    await expect(handler(invocation.event, invocation.context))
+      .rejects.toThrow("Rejected missing or malformed target thread ID")
+    expect(appendCalls).toBe(0)
   })
 
   test("concurrent exact redeliveries share append failure", async () => {
-    const handler = await captureWebhookHandler()
     let appendCalls = 0
     let rejectAppend!: (error: Error) => void
-    const invocation = webhookInvocation("amp-event-2", async () => {
+    const handler = await captureWebhookHandler(async () => {
       appendCalls += 1
       return new Promise<void>((_resolve, reject) => { rejectAppend = reject })
     })
+    const invocation = webhookInvocation("amp-event-2")
     const first = Promise.resolve(handler(invocation.event, invocation.context))
     const duplicate = Promise.resolve(handler(invocation.event, invocation.context))
     await Bun.sleep(0)

@@ -80,6 +80,12 @@ watch. To run your own bridge, see [Self-hosting](#self-hosting).
 Keep the plugin filename `subscribe.ts` when upgrading. Amp includes the plugin identity in its
 durable webhook URLs, so renaming it would disconnect existing subscriptions.
 
+When upgrading from a version that does not include an authenticated target thread in forwarded
+events, deploy the bridge before updating the plugin. The bridge field is additive, so the old
+plugin tolerates it; the updated plugin rejects events without it rather than risk appending them to
+the wrong thread. Existing subscription rows already contain the required thread ID and do not need
+to be recreated.
+
 When migrating from `github-relay.ts`, remove the old plugin and recreate its subscriptions after
 installing `subscribe.ts`.
 
@@ -103,9 +109,13 @@ RSS/Atom ───poll──────┘          ▲                        
                                 └──────── subscription ──────────┘
 ```
 
-The plugin creates a durable webhook for the current Amp thread and registers what it wants to
-watch. amp-subscribe verifies matching GitHub events and forwards a small event summary to that
-webhook. Amp stores the event and wakes the thread even when its orb is asleep.
+The plugin creates a durable webhook and registers what the current thread wants to watch. Amp can
+share one plugin webhook registration across several project threads owned by the same user, so the
+bridge stores the authenticated subscribing thread ID with each subscription. amp-subscribe
+verifies matching GitHub events, adds that trusted target thread ID to a small event summary, and
+forwards it to the webhook. The plugin validates the ID and looks up the target thread explicitly;
+Amp stores the event and wakes that thread even when its orb is asleep. Feed events use the same
+routing contract.
 
 For feeds, the bridge polls public HTTPS URLs every five minutes by default. Set
 `FEED_POLL_INTERVAL_SECONDS` to change the interval (minimum 30 seconds). Conditional requests are
@@ -183,8 +193,10 @@ mise exec -- flyctl deploy --remote-only --app "$APP"
 ## Security
 
 The subscription API authenticates Amp with short-lived workload identity tokens and derives the
-thread owner from the signed identity. GitHub webhooks are signature-checked, delivery IDs are
-deduplicated, and outbound delivery is restricted to configured HTTPS hosts.
+thread owner from the signed identity. Forwarded target thread IDs come only from those authenticated
+subscription records, not GitHub or feed content. GitHub webhooks are signature-checked, delivery
+IDs are deduplicated per subscription, and outbound delivery is restricted to configured HTTPS
+hosts.
 
 amp-subscribe forwards bounded event metadata, not untrusted PR titles, comments, check output,
 commit messages, patches, or filenames. Amp fetches that content through its normal GitHub tools

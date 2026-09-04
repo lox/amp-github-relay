@@ -239,14 +239,18 @@ export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
         event.event,
       )) {
         if (database.wasDelivered(subscription.id, deliveryId, event.event)) continue
-        const forwardedBody = JSON.stringify({ ...event, behavior: subscription.behavior })
+        const forwardedBody = JSON.stringify({
+          ...event,
+          behavior: subscription.behavior,
+          targetThreadID: subscription.threadId,
+        })
         let response: Response
         try {
           response = await fetch(subscription.webhookUrl, {
             method: "POST",
             headers: {
               "content-type": "application/json",
-              "idempotency-key": idempotencyKey,
+              "idempotency-key": `${idempotencyKey}:${subscription.id}`,
             },
             body: forwardedBody,
             signal: AbortSignal.timeout(10_000),
@@ -372,6 +376,7 @@ export function createSubscriptionBridge(config: SubscriptionBridgeConfig) {
               updatedAt: entry.updatedAt,
             },
             behavior: subscription.behavior,
+            targetThreadID: subscription.threadId,
           })
           let response: Response
           try {
