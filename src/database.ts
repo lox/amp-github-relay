@@ -252,7 +252,7 @@ export class SubscriptionDatabase {
   countSubscriptionsByTargetType(): Array<{ targetType: string; count: number }> {
     return this.sqlite.query<{ target_type: string; count: number }, []>(`
       SELECT COALESCE(target_type, 'pull_request') AS target_type, COUNT(*) AS count
-      FROM subscriptions GROUP BY target_type
+      FROM subscriptions GROUP BY COALESCE(target_type, 'pull_request')
     `).all().map((row) => ({ targetType: row.target_type, count: row.count }))
   }
 
